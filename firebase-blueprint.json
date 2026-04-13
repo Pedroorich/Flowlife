@@ -1,0 +1,71 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User settings and onboarding state",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "User's preferred name" },
+        "dailyCapacity": { "type": "number", "description": "Daily capacity in minutes" },
+        "activeAreas": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Life areas the user wants to organize"
+        },
+        "onboardingCompleted": { "type": "boolean", "description": "Whether the user has completed the onboarding flow" },
+        "uid": { "type": "string", "description": "Firebase Auth UID" }
+      },
+      "required": ["name", "dailyCapacity", "activeAreas", "onboardingCompleted", "uid"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "A task, appointment, or project item",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Task title" },
+        "type": { "type": "string", "enum": ["Projeto", "Tarefa", "Compromisso", "Entrega", "Reunião", "Meta", "Hábito", "Outro"] },
+        "area": { "type": "string", "enum": ["Trabalho", "Estudos", "Saúde & Bem-estar", "Finanças", "Casa & Família", "Projetos Pessoais", "Social & Relacionamentos", "Outro"] },
+        "priority": { "type": "string", "enum": ["Alta", "Média", "Baixa"] },
+        "deadline": { "type": "string", "format": "date-time", "description": "Legacy deadline, acts as endDate" },
+        "startDate": { "type": "string", "format": "date-time", "description": "When the task can start" },
+        "endDate": { "type": "string", "format": "date-time", "description": "When the task must end" },
+        "timeEstimate": { "type": "number", "description": "Estimated time in minutes" },
+        "notes": { "type": "string", "description": "Optional notes" },
+        "status": { "type": "string", "enum": ["pending", "completed"] },
+        "dateAllocated": { "type": "string", "description": "YYYY-MM-DD format for the day it is scheduled" },
+        "isFixed": { "type": "boolean", "description": "True if it's a fixed appointment" },
+        "parentTaskId": { "type": "string", "description": "ID of the parent task if fractioned" },
+        "userId": { "type": "string", "description": "Owner UID" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "type", "area", "priority", "timeEstimate", "status", "userId", "createdAt"]
+    },
+    "UnforeseenEvent": {
+      "title": "UnforeseenEvent",
+      "description": "An event that reduces daily capacity",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "date": { "type": "string", "description": "YYYY-MM-DD" },
+        "duration": { "type": "number", "description": "Duration in minutes" },
+        "description": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "date", "duration", "description", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profiles and settings"
+    },
+    "/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/Task" },
+      "description": "Tasks belonging to users"
+    },
+    "/unforeseen_events/{eventId}": {
+      "schema": { "$ref": "#/entities/UnforeseenEvent" },
+      "description": "Unforeseen events that consume time"
+    }
+  }
+}
