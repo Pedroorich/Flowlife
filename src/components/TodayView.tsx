@@ -4,7 +4,7 @@ import { db } from '../firebase';
 import { doc, updateDoc, addDoc, collection } from 'firebase/firestore';
 import { Play, Check, Clock, AlertCircle, AlertTriangle, Edit2, PlayCircle } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
-import { cn } from '../lib/utils';
+import { cn, sendBrowserNotification } from '../lib/utils';
 import { distributeTasks } from '../lib/scheduler';
 
 interface TodayViewProps {
@@ -79,6 +79,27 @@ export function TodayView({ profile, tasks, unforeseenEvents }: TodayViewProps) 
     }
   }, [profile.dailyState, isDayActive]);
 
+  // Checagem de notificações locais para o timer ativo
+  useEffect(() => {
+    if (!isDayActive || !profile.dailyState?.currentTaskId || !activeTimer) return;
+    
+    const { timeLeft } = activeTimer;
+    const task = allTodayTasks.find(t => t.id === profile.dailyState.currentTaskId);
+    if (!task) return;
+
+    if (timeLeft <= 300 && timeLeft > 0 && !profile.dailyState.notified5Min) {
+      sendBrowserNotification('FlowLife', { body: `Faltam 5 minutos para encerrar a tarefa: ${task.title}` });
+      updateDoc(doc(db, 'users', profile.uid), {
+        'dailyState.notified5Min': true
+      }).catch(console.error);
+    } else if (timeLeft <= 0 && !profile.dailyState.notifiedEnd) {
+      sendBrowserNotification('FlowLife', { body: `Tarefa "${task.title}" encerrada. Retorne ao app para começar a próxima!` });
+      updateDoc(doc(db, 'users', profile.uid), {
+        'dailyState.notifiedEnd': true
+      }).catch(console.error);
+    }
+  }, [activeTimer?.timeLeft, profile.dailyState, isDayActive, allTodayTasks, profile.uid]);
+
   const startTask = async (task: Task) => {
     const endTime = new Date(Date.now() + task.timeEstimate * 60000).toISOString();
     try {
@@ -89,6 +110,9 @@ export function TodayView({ profile, tasks, unforeseenEvents }: TodayViewProps) 
         'dailyState.notifiedEnd': false
       });
       setActiveTimer({ taskId: task.id!, timeLeft: task.timeEstimate * 60 });
+      
+      // Notificação local
+      sendBrowserNotification('FlowLife', { body: `Iniciando tarefa: ${task.title}` });
       
       // Fire webhook
       if (profile.webhookUrlStart) {
@@ -121,6 +145,9 @@ export function TodayView({ profile, tasks, unforeseenEvents }: TodayViewProps) 
         }
       });
       setActiveTimer({ taskId: firstTask.id!, timeLeft: firstTask.timeEstimate * 60 });
+
+      // Notificação local
+      sendBrowserNotification('FlowLife', { body: `Iniciando o dia. Primeira tarefa: ${firstTask.title}` });
 
       if (profile.webhookUrlStart) {
          fetch(profile.webhookUrlStart, {
