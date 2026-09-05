@@ -126,6 +126,8 @@ export interface UserProfile {
   webhookUrl5Min?: string;
   webhookUrlEnd?: string;
   
+  routinesCleared?: boolean;
+  
   dailyState?: {
     date: string; // YYYY-MM-DD
     active: boolean;

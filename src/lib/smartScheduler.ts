@@ -144,7 +144,7 @@ export function buildDailyTimeline(
 
   const rawRoutines = customRoutines.length > 0 
     ? customRoutines 
-    : DEFAULT_ROUTINES.map((r, i) => ({ ...r, id: `default-${i}`, userId: profile.uid }));
+    : (profile.routinesCleared ? [] : DEFAULT_ROUTINES.map((r, i) => ({ ...r, id: `default-${i}`, userId: profile.uid })));
 
   const dayRoutines = rawRoutines.filter(r => r.daysOfWeek.includes(dayOfWeek));
 

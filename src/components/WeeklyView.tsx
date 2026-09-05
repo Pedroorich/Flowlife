@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Task, UserProfile, UnforeseenEvent, RoutineBlock } from '../types';
 import { db } from '../firebase';
-import { doc, updateDoc } from 'firebase/firestore';
+import { doc, updateDoc, deleteDoc } from 'firebase/firestore';
 import { 
   addDays, 
   startOfWeek, 
@@ -17,7 +17,8 @@ import {
   AlertTriangle,
   ArrowRight,
   Check,
-  Sparkles
+  Sparkles,
+  Trash2
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { buildDailyTimeline } from '../lib/smartScheduler';
@@ -74,6 +75,15 @@ export function WeeklyView({ profile, tasks, unforeseenEvents, routines = [] }: 
       });
     } catch (e) {
       console.error("Erro ao concluir", e);
+    }
+  };
+
+  const handleDeleteTask = async (taskId: string) => {
+    if (!confirm('Deseja excluir esta tarefa?')) return;
+    try {
+      await deleteDoc(doc(db, 'tasks', taskId));
+    } catch (e) {
+      console.error("Erro ao excluir", e);
     }
   };
 
@@ -180,15 +190,24 @@ export function WeeklyView({ profile, tasks, unforeseenEvents, routines = [] }: 
                     >
                       <div className="flex items-start justify-between gap-1 mb-1">
                         <span className="font-medium text-white line-clamp-2">{task.title}</span>
-                        {task.status !== 'completed' && (
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {task.status !== 'completed' && (
+                            <button 
+                              onClick={() => handleComplete(task.id!)}
+                              className="text-gray-500 hover:text-accent-emerald apple-press p-0.5"
+                              title="Concluir"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           <button 
-                            onClick={() => handleComplete(task.id!)}
-                            className="text-gray-500 hover:text-accent-emerald shrink-0"
-                            title="Concluir"
+                            onClick={() => handleDeleteTask(task.id!)}
+                            className="text-gray-500 hover:text-red-400 apple-press p-0.5"
+                            title="Excluir Tarefa"
                           >
-                            <Check className="w-3.5 h-3.5" />
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
-                        )}
+                        </div>
                       </div>
 
                       <div className="flex items-center justify-between text-[10px] text-gray-400 pt-1 border-t border-white/5">

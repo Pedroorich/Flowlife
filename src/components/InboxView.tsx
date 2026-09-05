@@ -1,9 +1,22 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Task, TaskType, LifeArea, Priority, UserProfile, Project } from '../types';
 import { db } from '../firebase';
-import { collection, addDoc, writeBatch, doc } from 'firebase/firestore';
-import { Plus, Sparkles, Send, Loader2, Zap, Clock, ShieldAlert, FolderKanban } from 'lucide-react';
+import { collection, addDoc, writeBatch, doc, deleteDoc, updateDoc, query, where, getDocs } from 'firebase/firestore';
+import { 
+  Plus, 
+  Sparkles, 
+  Send, 
+  Loader2, 
+  Zap, 
+  Clock, 
+  ShieldAlert, 
+  FolderKanban, 
+  Trash2, 
+  Check, 
+  Calendar 
+} from 'lucide-react';
 import { GoogleGenAI } from '@google/genai';
+import { format } from 'date-fns';
 import { cn } from '../lib/utils';
 
 const TASK_TYPES: TaskType[] = ["Projeto", "Tarefa", "Compromisso", "Entrega", "Reunião", "Meta", "Hábito", "Outro"];
@@ -12,9 +25,10 @@ const PRIORITIES: Priority[] = ["Alta", "Média", "Baixa"];
 interface InboxViewProps {
   profile: UserProfile;
   projects?: Project[];
+  tasks?: Task[];
 }
 
-export function InboxView({ profile, projects = [] }: InboxViewProps) {
+export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps) {
   const [mode, setMode] = useState<'ai' | 'quick' | 'manual'>('quick');
   
   // Quick Capture State
@@ -530,12 +544,134 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
           <button 
             type="submit"
             disabled={loading}
-            className="w-full py-3 bg-accent-amber text-background font-bold text-sm rounded-xl hover:bg-amber-400 transition-colors disabled:opacity-50"
+            className="apple-press w-full py-3 bg-accent-amber text-background font-bold text-sm rounded-xl hover:bg-amber-400 transition-colors disabled:opacity-50 shadow-md shadow-amber-500/15"
           >
             {loading ? 'Salvando...' : 'Cadastrar Tarefa Estratégica'}
           </button>
         </form>
       )}
+
+      {/* 4. FILA DO BACKLOG (TAREFAS CADASTRADAS & GESTÃO DE EXCLUSÃO) */}
+      <div className="apple-card rounded-3xl p-6 md:p-8 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/5">
+          <div>
+            <h3 className="text-lg font-bold text-white tracking-tight">Fila do Backlog</h3>
+            <p className="text-xs text-white/50">
+              Tarefas pendentes aguardando alocação na agenda. Escolha quais agendar ou excluir.
+            </p>
+          </div>
+
+          {tasks.filter(t => t.status === 'pending').length > 0 && (
+            <button 
+              onClick={async () => {
+                if (!confirm('Deseja excluir TODAS as tarefas pendentes do Backlog?')) return;
+                try {
+                  const q = query(collection(db, 'tasks'), where('userId', '==', profile.uid), where('status', '==', 'pending'));
+                  const snap = await getDocs(q);
+                  const batch = writeBatch(db);
+                  snap.docs.forEach(d => batch.delete(d.ref));
+                  await batch.commit();
+                  alert('Backlog limpo com sucesso!');
+                } catch (e) {
+                  console.error("Erro ao limpar backlog", e);
+                }
+              }}
+              className="apple-press px-3 py-1.5 bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl text-xs font-semibold hover:bg-red-500/20 transition-all flex items-center gap-1.5 self-start sm:self-auto"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Limpar Todo o Backlog
+            </button>
+          )}
+        </div>
+
+        {tasks.filter(t => t.status === 'pending').length === 0 ? (
+          <div className="py-12 text-center text-white/40 text-xs italic">
+            Nenhuma tarefa pendente no Backlog. Adicione acima para abastecer o sistema!
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {tasks.filter(t => t.status === 'pending').map(task => {
+              const todayStr = format(new Date(), 'yyyy-MM-dd');
+              const isAllocatedToday = task.dateAllocated === todayStr;
+
+              return (
+                <div 
+                  key={task.id}
+                  className="bg-black/30 border border-white/8 hover:border-white/20 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all"
+                >
+                  <div className="flex-1">
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                      <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-white/5 border border-white/10 text-white/70 font-medium">
+                        {task.area}
+                      </span>
+                      {task.projectId && (
+                        <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 font-medium">
+                          {projects.find(p => p.id === task.projectId)?.name || 'Projeto'}
+                        </span>
+                      )}
+                      {isAllocatedToday && (
+                        <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-accent-amber/20 text-accent-amber border border-accent-amber/30 font-bold">
+                          Agendada para Hoje
+                        </span>
+                      )}
+                    </div>
+
+                    <h4 className="text-sm font-semibold text-white tracking-tight">{task.title}</h4>
+                    <div className="flex items-center gap-3 text-[11px] text-white/40 mt-1">
+                      <span className="flex items-center gap-1">
+                        <Clock className="w-3 h-3" /> {task.timeEstimate}m (Máx: {task.timeMax || Math.round(task.timeEstimate * 1.5)}m)
+                      </span>
+                      <span>Impacto: {task.impact || 3}/5</span>
+                      <span>Urgência: {task.urgency || 3}/5</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 self-end sm:self-center">
+                    {!isAllocatedToday && (
+                      <button 
+                        onClick={async () => {
+                          if (!task.id) return;
+                          await updateDoc(doc(db, 'tasks', task.id), {
+                            dateAllocated: todayStr
+                          });
+                        }}
+                        className="apple-press px-3 py-1.5 rounded-xl bg-accent-amber/15 border border-accent-amber/30 text-accent-amber text-xs font-semibold hover:bg-accent-amber/25 transition-all flex items-center gap-1"
+                        title="Puxar para Hoje"
+                      >
+                        <Calendar className="w-3 h-3" /> Hoje
+                      </button>
+                    )}
+
+                    <button 
+                      onClick={async () => {
+                        if (!task.id) return;
+                        await updateDoc(doc(db, 'tasks', task.id), {
+                          status: 'completed',
+                          dateAllocated: todayStr
+                        });
+                      }}
+                      className="apple-press p-2 rounded-xl bg-accent-emerald/15 text-accent-emerald border border-accent-emerald/30 hover:bg-accent-emerald hover:text-background transition-all"
+                      title="Concluir Tarefa"
+                    >
+                      <Check className="w-4 h-4" />
+                    </button>
+
+                    <button 
+                      onClick={async () => {
+                        if (!task.id || !confirm('Deseja excluir esta tarefa?')) return;
+                        await deleteDoc(doc(db, 'tasks', task.id));
+                      }}
+                      className="apple-press p-2 rounded-xl bg-white/5 border border-white/10 text-white/40 hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10 transition-all"
+                      title="Excluir Tarefa"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

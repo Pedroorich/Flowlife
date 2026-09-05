@@ -1,7 +1,17 @@
 import React, { useState } from 'react';
 import { RoutineBlock, UserProfile, LifeArea } from '../types';
 import { db } from '../firebase';
-import { collection, addDoc, updateDoc, deleteDoc, doc } from 'firebase/firestore';
+import { 
+  collection, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  doc, 
+  getDocs, 
+  query, 
+  where, 
+  writeBatch 
+} from 'firebase/firestore';
 import { 
   Flame, 
   Plus, 
@@ -11,8 +21,9 @@ import {
   Car, 
   Save, 
   Check,
-  CheckCircle2,
-  Calendar
+  RotateCcw,
+  AlertTriangle,
+  Sparkles
 } from 'lucide-react';
 import { DEFAULT_ROUTINES } from '../lib/smartScheduler';
 import { cn } from '../lib/utils';
@@ -33,7 +44,7 @@ const DAYS_OF_WEEK = [
 ];
 
 export function RoutinesView({ profile, routines }: RoutinesViewProps) {
-  // Configuração dos limites inegociáveis do perfil
+  // Configuração dos limites inegociáveis do perfil (Apple Design)
   const [workStartTime, setWorkStartTime] = useState(profile.workStartTime || '08:30');
   const [workEndTime, setWorkEndTime] = useState(profile.workEndTime || '19:00');
   const [wakeTime, setWakeTime] = useState(profile.wakeTime || '07:00');
@@ -50,6 +61,9 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
   const [transitBefore, setTransitBefore] = useState(15);
   const [transitAfter, setTransitAfter] = useState(15);
   const [selectedDays, setSelectedDays] = useState<number[]>([1, 2, 3, 4, 5]);
+
+  // Modais de Confirmação de Exclusão e Reset
+  const [isResetting, setIsResetting] = useState(false);
 
   const handleSaveProfileBoundaries = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -90,6 +104,13 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
         createdAt: new Date().toISOString()
       });
 
+      // Se havia flag de rotina limpa, remove
+      if (profile.routinesCleared) {
+        await updateDoc(doc(db, 'users', profile.uid), {
+          routinesCleared: false
+        });
+      }
+
       setTitle('');
       setShowModal(false);
     } catch (e) {
@@ -97,12 +118,109 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
     }
   };
 
+  // Excluir uma rotina individual
   const handleDeleteRoutine = async (routineId: string) => {
-    if (!confirm('Deseja remover esta rotina inegociável?')) return;
+    if (!confirm('Deseja excluir esta rotina?')) return;
+
     try {
-      await deleteDoc(doc(db, 'routines', routineId));
+      if (routineId.startsWith('default-')) {
+        // Se for um bloco padrão que ainda não estava no Firestore, inicializa o Firestore com as outras
+        const defaultList = DEFAULT_ROUTINES.map((r, i) => ({ ...r, id: `default-${i}` }));
+        const remaining = defaultList.filter(r => r.id !== routineId);
+
+        for (const r of remaining) {
+          await addDoc(collection(db, 'routines'), {
+            userId: profile.uid,
+            title: r.title,
+            area: r.area,
+            startTime: r.startTime,
+            endTime: r.endTime,
+            transitMinutesBefore: r.transitMinutesBefore || 0,
+            transitMinutesAfter: r.transitMinutesAfter || 0,
+            daysOfWeek: r.daysOfWeek,
+            isFixed: true,
+            createdAt: new Date().toISOString()
+          });
+        }
+
+        await updateDoc(doc(db, 'users', profile.uid), {
+          routinesCleared: false
+        });
+      } else {
+        await deleteDoc(doc(db, 'routines', routineId));
+      }
     } catch (e) {
-      console.error("Erro ao excluir", e);
+      console.error("Erro ao excluir rotina", e);
+    }
+  };
+
+  // Excluir TODA a rotina (Limpar do zero)
+  const handleClearAllRoutines = async () => {
+    if (!confirm('Tem certeza que deseja excluir TODAS as rotinas? Você terá uma agenda totalmente limpa para definir do zero.')) return;
+
+    setIsResetting(true);
+    try {
+      // Exclui todos os documentos de rotina do Firestore
+      const q = query(collection(db, 'routines'), where('userId', '==', profile.uid));
+      const snap = await getDocs(q);
+      const batch = writeBatch(db);
+      snap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+
+      // Marca o perfil como rotinas limpas para não reativar padrões automaticamente
+      await updateDoc(doc(db, 'users', profile.uid), {
+        routinesCleared: true
+      });
+
+      alert('Todas as rotinas foram excluídas. Sua agenda estrutural está 100% limpa!');
+    } catch (e) {
+      console.error("Erro ao limpar rotinas", e);
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  // Restaurar rotinas padrão do sistema
+  const handleRestoreDefaultRoutines = async () => {
+    if (!confirm('Deseja restaurar os blocos estruturais padrão (Musculação, Jiu-Jitsu, Igreja, etc.)?')) return;
+
+    setIsResetting(true);
+    try {
+      const q = query(collection(db, 'routines'), where('userId', '==', profile.uid));
+      const snap = await getDocs(q);
+      const batch = writeBatch(db);
+      snap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+
+      await updateDoc(doc(db, 'users', profile.uid), {
+        routinesCleared: false
+      });
+
+      alert('Rotinas padrão restauradas com sucesso!');
+    } catch (e) {
+      console.error("Erro ao restaurar rotinas", e);
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  // Reset Total de Tarefas
+  const handleClearAllTasks = async () => {
+    if (!confirm('ATENÇÃO: Deseja excluir todas as suas tarefas do sistema? Essa ação não pode ser desfeita.')) return;
+
+    setIsResetting(true);
+    try {
+      const q = query(collection(db, 'tasks'), where('userId', '==', profile.uid));
+      const snap = await getDocs(q);
+      const batch = writeBatch(db);
+      snap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+
+      alert('Todas as tarefas foram excluídas com sucesso!');
+    } catch (e) {
+      console.error("Erro ao excluir tarefas", e);
+    } finally {
+      setIsResetting(false);
     }
   };
 
@@ -112,197 +230,268 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
     );
   };
 
-  // Exibir rotinas cadastradas ou os padrões
-  const displayRoutines = routines.length > 0 ? routines : DEFAULT_ROUTINES.map((r, i) => ({
-    ...r,
-    id: `default-${i}`,
-    userId: profile.uid
-  }));
+  // Determinar se exibe rotinas ou vazio
+  const displayRoutines = routines.length > 0 
+    ? routines 
+    : (profile.routinesCleared ? [] : DEFAULT_ROUTINES.map((r, i) => ({
+        ...r,
+        id: `default-${i}`,
+        userId: profile.uid
+      })));
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8 pb-12">
-      {/* Header */}
+    <div className="max-w-4xl mx-auto space-y-8 pb-16">
+      {/* Header Apple Design */}
       <div>
-        <div className="flex items-center gap-2 text-xs text-accent-amber font-semibold mb-1">
+        <div className="flex items-center gap-2 text-xs text-accent-amber font-semibold tracking-wide uppercase mb-1">
           <Flame className="w-4 h-4" />
           Estrutura & Blocos Inegociáveis
         </div>
-        <h2 className="font-serif text-3xl text-white">Rotinas & Limites de Vida</h2>
-        <p className="text-sm text-gray-400">
-          Sua saúde, seus treinos, igreja e horário de dormir são restrições do sistema, não obstáculos.
+        <h2 className="font-serif text-3xl text-white tracking-tight">Rotinas & Limites de Vida</h2>
+        <p className="text-sm text-white/60 mt-1">
+          Seus treinos, cultos, almoço e horário de dormir são restrições inegociáveis do sistema, nunca obstáculos.
         </p>
       </div>
 
-      {/* 1. Limites Globais de Jornada e Encerramento */}
-      <div className="bg-surface border border-border rounded-2xl p-6 shadow-sm">
-        <div className="flex items-center gap-3 mb-4">
-          <div className="p-2.5 rounded-xl bg-accent-amber/10 text-accent-amber">
-            <ShieldAlert className="w-5 h-5" />
+      {/* 1. Limites Globais de Jornada e Encerramento (Estilo Cartão Apple) */}
+      <div className="apple-card rounded-3xl p-6 md:p-8 shadow-xl">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="p-3 rounded-2xl bg-accent-amber/15 text-accent-amber border border-accent-amber/20">
+            <ShieldAlert className="w-6 h-6" />
           </div>
           <div>
-            <h3 className="text-base font-bold text-white">Limites Inegociáveis do Dia</h3>
-            <p className="text-xs text-gray-400">O sistema nunca agendará tarefas fora da sua janela permitida.</p>
+            <h3 className="text-lg font-bold text-white tracking-tight">Limites Inegociáveis de Jornada</h3>
+            <p className="text-xs text-white/50">O FlowLife bloqueia novos trabalhos fora da sua janela de produtividade.</p>
           </div>
         </div>
 
         <form onSubmit={handleSaveProfileBoundaries} className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div>
-            <label className="block text-xs font-medium text-gray-400 mb-1">Acordar</label>
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-white/60">Acordar</label>
             <input 
               type="time" 
               value={wakeTime}
               onChange={e => setWakeTime(e.target.value)}
-              className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-accent-amber"
+              className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-accent-amber focus:ring-1 focus:ring-accent-amber transition-all"
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-gray-400 mb-1">Início do Trabalho</label>
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-white/60">Início do Trabalho</label>
             <input 
               type="time" 
               value={workStartTime}
               onChange={e => setWorkStartTime(e.target.value)}
-              className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-accent-amber"
+              className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-accent-amber focus:ring-1 focus:ring-accent-amber transition-all"
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-red-400 font-bold mb-1">
+          <div className="space-y-1.5">
+            <label className="block text-xs font-semibold text-red-400">
               Encerramento Obrigatório
             </label>
             <input 
               type="time" 
               value={workEndTime}
               onChange={e => setWorkEndTime(e.target.value)}
-              className="w-full bg-background border-2 border-red-500/40 rounded-lg px-3 py-2 text-sm text-red-300 font-bold focus:outline-none focus:border-red-500"
+              className="w-full bg-red-950/20 border-2 border-red-500/40 rounded-xl px-3.5 py-2.5 text-sm text-red-300 font-bold focus:outline-none focus:border-red-500 transition-all"
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-gray-400 mb-1">Hora de Dormir</label>
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-white/60">Hora de Dormir</label>
             <input 
               type="time" 
               value={bedTime}
               onChange={e => setBedTime(e.target.value)}
-              className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-accent-amber"
+              className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-accent-amber focus:ring-1 focus:ring-accent-amber transition-all"
             />
           </div>
 
-          <div className="md:col-span-4 flex justify-end pt-2">
+          <div className="md:col-span-4 flex justify-end pt-3">
             <button 
               type="submit"
               disabled={isSavingProfile}
-              className="px-5 py-2.5 bg-accent-amber text-background font-bold text-xs rounded-xl hover:bg-amber-400 transition-colors flex items-center gap-2"
+              className="apple-press px-6 py-2.5 bg-accent-amber text-background font-bold text-xs rounded-xl hover:bg-amber-400 transition-all flex items-center gap-2 shadow-lg shadow-amber-500/15"
             >
               {profileSaved ? <Check className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-              {profileSaved ? 'Limites Salvos!' : 'Salvar Limites de Jornada'}
+              {profileSaved ? 'Limites Salvos!' : 'Salvar Limites de Horário'}
             </button>
           </div>
         </form>
       </div>
 
-      {/* 2. Lista de Rotinas Estruturais (Musculação, Jiu-Jitsu, Igreja, etc.) */}
-      <div className="bg-surface border border-border rounded-2xl p-6">
-        <div className="flex items-center justify-between mb-6">
+      {/* 2. Lista de Rotinas Estruturais com Gestão e Exclusão */}
+      <div className="apple-card rounded-3xl p-6 md:p-8">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
           <div>
-            <h3 className="text-lg font-bold text-white">Blocos Estruturais Cadastrados</h3>
-            <p className="text-xs text-gray-400">Atividades que bloqueiam a agenda com reserva de deslocamento.</p>
+            <h3 className="text-lg font-bold text-white tracking-tight">Blocos Estruturais Ativos</h3>
+            <p className="text-xs text-white/50">Atividades fixas que reservam o calendário e tempos de deslocamento.</p>
           </div>
-          <button 
-            onClick={() => setShowModal(true)}
-            className="px-3.5 py-2 bg-accent-emerald text-background font-bold text-xs rounded-lg hover:bg-emerald-400 transition-colors flex items-center gap-1.5"
-          >
-            <Plus className="w-4 h-4" /> Novo Bloco
-          </button>
+
+          <div className="flex items-center gap-2">
+            {profile.routinesCleared ? (
+              <button 
+                onClick={handleRestoreDefaultRoutines}
+                disabled={isResetting}
+                className="apple-press px-3.5 py-2 bg-white/10 text-white rounded-xl text-xs font-medium hover:bg-white/20 transition-all flex items-center gap-1.5"
+              >
+                <RotateCcw className="w-3.5 h-3.5" /> Restaurar Padrões
+              </button>
+            ) : (
+              <button 
+                onClick={handleClearAllRoutines}
+                disabled={isResetting}
+                className="apple-press px-3 py-2 bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl text-xs font-medium hover:bg-red-500/20 transition-all flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Excluir Toda a Rotina
+              </button>
+            )}
+
+            <button 
+              onClick={() => setShowModal(true)}
+              className="apple-press px-4 py-2 bg-accent-emerald text-background font-bold text-xs rounded-xl hover:bg-emerald-400 transition-all flex items-center gap-1.5 shadow-md shadow-emerald-500/15"
+            >
+              <Plus className="w-4 h-4" /> Novo Bloco
+            </button>
+          </div>
         </div>
 
-        <div className="space-y-3">
-          {displayRoutines.map(routine => {
-            const hasTransit = (routine.transitMinutesBefore || 0) > 0 || (routine.transitMinutesAfter || 0) > 0;
-            return (
-              <div 
-                key={routine.id}
-                className="bg-background/80 border border-border rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
-              >
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-sm font-bold text-white">{routine.title}</span>
-                    <span className="text-[11px] px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 font-medium">
-                      {routine.area}
-                    </span>
-                  </div>
-
-                  {/* Dias da semana */}
-                  <div className="flex items-center gap-1 mt-2">
-                    {DAYS_OF_WEEK.map(d => (
-                      <span 
-                        key={d.id}
-                        className={cn(
-                          "w-6 h-6 rounded text-[10px] font-bold flex items-center justify-center",
-                          routine.daysOfWeek.includes(d.id) 
-                            ? "bg-accent-amber text-background" 
-                            : "text-gray-600 bg-white/5"
-                        )}
-                      >
-                        {d.label[0]}
+        {displayRoutines.length === 0 ? (
+          <div className="py-12 text-center border border-dashed border-white/10 rounded-2xl">
+            <Flame className="w-10 h-10 text-white/30 mx-auto mb-2" />
+            <h4 className="text-sm font-medium text-white">Nenhuma rotina ativa</h4>
+            <p className="text-xs text-white/40 max-w-sm mx-auto mb-4">
+              Você excluiu todos os blocos estruturais. Adicione suas atividades personalizadas ou restaure os padrões quando quiser.
+            </p>
+            <button 
+              onClick={handleRestoreDefaultRoutines}
+              className="apple-press px-4 py-2 bg-accent-amber text-background font-bold rounded-xl text-xs"
+            >
+              Restaurar Rotinas Sugeridas
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {displayRoutines.map(routine => {
+              const hasTransit = (routine.transitMinutesBefore || 0) > 0 || (routine.transitMinutesAfter || 0) > 0;
+              return (
+                <div 
+                  key={routine.id}
+                  className="bg-black/30 border border-white/8 hover:border-white/20 rounded-2xl p-4.5 flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all"
+                >
+                  <div>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="text-sm font-bold text-white tracking-tight">{routine.title}</span>
+                      <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 font-medium">
+                        {routine.area}
                       </span>
-                    ))}
-                  </div>
-
-                  {hasTransit && (
-                    <div className="flex items-center gap-1 text-[11px] text-blue-400 mt-2">
-                      <Car className="w-3.5 h-3.5" />
-                      <span>Deslocamento: {routine.transitMinutesBefore || 0}m antes / {routine.transitMinutesAfter || 0}m depois</span>
                     </div>
-                  )}
-                </div>
 
-                <div className="flex items-center gap-4 self-end md:self-center">
-                  <div className="text-right font-mono">
-                    <div className="text-sm text-white font-bold">{routine.startTime} – {routine.endTime}</div>
-                    <div className="text-[11px] text-gray-500">Horário Fixo</div>
+                    {/* Dias da semana em formato de pílulas Apple */}
+                    <div className="flex items-center gap-1 mt-2">
+                      {DAYS_OF_WEEK.map(d => (
+                        <span 
+                          key={d.id}
+                          className={cn(
+                            "w-6 h-6 rounded-lg text-[10px] font-bold flex items-center justify-center transition-all",
+                            routine.daysOfWeek.includes(d.id) 
+                              ? "bg-accent-amber text-background shadow-sm" 
+                              : "text-white/25 bg-white/[0.03]"
+                          )}
+                        >
+                          {d.label[0]}
+                        </span>
+                      ))}
+                    </div>
+
+                    {hasTransit && (
+                      <div className="flex items-center gap-1.5 text-[11px] text-blue-400 mt-2.5 font-medium">
+                        <Car className="w-3.5 h-3.5" />
+                        <span>Deslocamento: {routine.transitMinutesBefore || 0}m antes / {routine.transitMinutesAfter || 0}m depois</span>
+                      </div>
+                    )}
                   </div>
 
-                  {routine.id && !routine.id.startsWith('default-') && (
+                  <div className="flex items-center gap-4 self-end md:self-center">
+                    <div className="text-right font-mono">
+                      <div className="text-sm text-white font-bold">{routine.startTime} – {routine.endTime}</div>
+                      <div className="text-[11px] text-white/40">Horário Fixo</div>
+                    </div>
+
+                    {/* Botão de Excluir Bloco Individual */}
                     <button 
                       onClick={() => handleDeleteRoutine(routine.id!)}
-                      className="text-gray-500 hover:text-red-400 p-2"
-                      title="Excluir"
+                      className="apple-press p-2.5 rounded-xl bg-white/5 border border-white/10 hover:border-red-500/40 hover:bg-red-500/10 text-white/50 hover:text-red-400 transition-all"
+                      title="Excluir este bloco"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
-                  )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 3. ZONA DE RESET TOTAL DO SISTEMA */}
+      <div className="border border-red-500/20 bg-red-500/5 rounded-3xl p-6 md:p-8">
+        <div className="flex items-start gap-4">
+          <div className="p-3 rounded-2xl bg-red-500/20 text-red-400 border border-red-500/30 shrink-0">
+            <AlertTriangle className="w-6 h-6" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-base font-bold text-red-400">Zona de Reset & Recomeço</h3>
+            <p className="text-xs text-red-300/80 leading-relaxed mb-4">
+              Se você quiser limpar o aplicativo para recomeçar sua organização do zero, use as opções abaixo:
+            </p>
+
+            <div className="flex flex-wrap gap-3">
+              <button 
+                onClick={handleClearAllRoutines}
+                disabled={isResetting}
+                className="apple-press px-4 py-2.5 bg-black/40 border border-red-500/30 text-red-300 hover:bg-red-500/20 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Excluir Toda a Rotina
+              </button>
+
+              <button 
+                onClick={handleClearAllTasks}
+                disabled={isResetting}
+                className="apple-press px-4 py-2.5 bg-red-500/20 border border-red-500/40 text-red-200 hover:bg-red-500/30 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Resetar Todas as Tarefas
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
       {/* Modal de Novo Bloco de Rotina */}
       {showModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-surface border border-border rounded-2xl p-6 w-full max-w-md animate-in zoom-in-95">
-            <h3 className="text-xl font-bold mb-4">Adicionar Bloco Estrutural</h3>
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="apple-glass rounded-3xl p-6 md:p-8 w-full max-w-md animate-in zoom-in-95">
+            <h3 className="text-xl font-bold text-white mb-4 tracking-tight">Adicionar Bloco Estrutural</h3>
             <form onSubmit={handleAddRoutine} className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-gray-400 mb-1">Nome da Atividade</label>
+                <label className="block text-xs font-medium text-white/60 mb-1.5">Nome da Atividade</label>
                 <input 
                   type="text" 
                   value={title}
                   onChange={e => setTitle(e.target.value)}
                   required
                   placeholder="Ex: Musculação, Jiu-Jitsu, Culto..."
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-accent-amber"
+                  className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-accent-amber"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-400 mb-1">Área</label>
+                <label className="block text-xs font-medium text-white/60 mb-1.5">Área</label>
                 <select 
                   value={area}
                   onChange={e => setArea(e.target.value as LifeArea)}
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-accent-amber"
+                  className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-accent-amber"
                 >
                   <option value="Saúde & Treino">Saúde & Treino</option>
                   <option value="Igreja & Espiritual">Igreja & Espiritual</option>
@@ -314,63 +503,63 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-gray-400 mb-1">Horário de Início</label>
+                  <label className="block text-xs font-medium text-white/60 mb-1.5">Horário de Início</label>
                   <input 
                     type="time" 
                     value={startTime}
                     onChange={e => setStartTime(e.target.value)}
                     required
-                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent-amber"
+                    className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2 text-sm text-white focus:outline-none focus:border-accent-amber"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-400 mb-1">Horário de Fim</label>
+                  <label className="block text-xs font-medium text-white/60 mb-1.5">Horário de Fim</label>
                   <input 
                     type="time" 
                     value={endTime}
                     onChange={e => setEndTime(e.target.value)}
                     required
-                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent-amber"
+                    className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2 text-sm text-white focus:outline-none focus:border-accent-amber"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-gray-400 mb-1">Deslocamento Antes (min)</label>
+                  <label className="block text-xs font-medium text-white/60 mb-1.5">Deslocamento Antes (min)</label>
                   <input 
                     type="number" 
                     value={transitBefore}
                     onChange={e => setTransitBefore(Number(e.target.value))}
                     min="0" step="5"
-                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent-amber"
+                    className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2 text-sm text-white focus:outline-none focus:border-accent-amber"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-400 mb-1">Deslocamento Depois (min)</label>
+                  <label className="block text-xs font-medium text-white/60 mb-1.5">Deslocamento Depois (min)</label>
                   <input 
                     type="number" 
                     value={transitAfter}
                     onChange={e => setTransitAfter(Number(e.target.value))}
                     min="0" step="5"
-                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent-amber"
+                    className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2 text-sm text-white focus:outline-none focus:border-accent-amber"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-400 mb-2">Dias da Semana</label>
-                <div className="flex gap-2">
+                <label className="block text-xs font-medium text-white/60 mb-2">Dias da Semana</label>
+                <div className="flex gap-1.5">
                   {DAYS_OF_WEEK.map(d => (
                     <button 
                       key={d.id}
                       type="button"
                       onClick={() => toggleDay(d.id)}
                       className={cn(
-                        "flex-1 py-2 rounded-lg text-xs font-bold transition-colors",
+                        "apple-press flex-1 py-2.5 rounded-xl text-xs font-bold transition-all",
                         selectedDays.includes(d.id) 
-                          ? "bg-accent-amber text-background" 
-                          : "bg-background border border-border text-gray-400"
+                          ? "bg-accent-amber text-background shadow-md" 
+                          : "bg-black/30 border border-white/10 text-white/40"
                       )}
                     >
                       {d.label}
@@ -379,17 +568,17 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
                 </div>
               </div>
 
-              <div className="flex gap-3 pt-3">
+              <div className="flex gap-3 pt-4">
                 <button 
                   type="button"
                   onClick={() => setShowModal(false)}
-                  className="flex-1 py-2.5 rounded-lg border border-border text-gray-400 hover:text-white text-sm"
+                  className="apple-press flex-1 py-3 rounded-xl border border-white/10 text-white/60 hover:text-white text-sm"
                 >
                   Cancelar
                 </button>
                 <button 
                   type="submit"
-                  className="flex-1 py-2.5 bg-accent-emerald text-background font-bold rounded-lg text-sm hover:bg-emerald-400 transition-colors"
+                  className="apple-press flex-1 py-3 bg-accent-emerald text-background font-bold rounded-xl text-sm hover:bg-emerald-400 transition-colors shadow-lg shadow-emerald-500/15"
                 >
                   Salvar Bloco
                 </button>

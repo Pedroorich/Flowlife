@@ -278,6 +278,7 @@ export default function App() {
               <InboxView 
                 profile={profile} 
                 projects={projects} 
+                tasks={tasks}
               />
             )}
             {activeTab === 'dashboard' && (

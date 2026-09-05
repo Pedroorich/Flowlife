@@ -2,17 +2,68 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "DM Sans", system-ui, sans-serif;
   --font-serif: "DM Serif Display", ui-serif, Georgia, serif;
 
-  --color-background: #0F0F0F;
-  --color-surface: #1A1A1A;
-  --color-border: #2A2A2A;
+  --color-background: #090A0C;
+  --color-surface: #14161A;
+  --color-border: rgba(255, 255, 255, 0.08);
   
-  --color-accent-amber: #F59E0B;
-  --color-accent-emerald: #10B981;
+  --color-accent-amber: #F5A623;
+  --color-accent-emerald: #30D158;
 }
 
 body {
-  @apply bg-background text-white font-sans;
+  @apply bg-background text-white font-sans antialiased selection:bg-accent-amber/20 selection:text-accent-amber;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Apple Design Glassmorphism & Feedback Utilities */
+.apple-glass {
+  background: rgba(20, 22, 26, 0.72);
+  backdrop-filter: blur(24px) saturate(190%);
+  -webkit-backdrop-filter: blur(24px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+}
+
+.apple-card {
+  background: rgba(24, 27, 32, 0.65);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.apple-card:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(28, 31, 38, 0.75);
+}
+
+.apple-press {
+  transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.12s ease;
+}
+
+.apple-press:active {
+  transform: scale(0.97);
+  opacity: 0.92;
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
 }

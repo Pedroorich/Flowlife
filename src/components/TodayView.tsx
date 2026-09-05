@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Task, UserProfile, UnforeseenEvent, RoutineBlock, Project } from '../types';
 import { db } from '../firebase';
-import { doc, updateDoc, addDoc, collection } from 'firebase/firestore';
+import { doc, updateDoc, addDoc, collection, deleteDoc } from 'firebase/firestore';
 import { 
   Play, 
   Check, 
@@ -19,7 +19,8 @@ import {
   Flame,
   ShieldAlert,
   Coffee,
-  Car
+  Car,
+  Trash2
 } from 'lucide-react';
 import { format, parseISO, isSameDay } from 'date-fns';
 import { cn, sendBrowserNotification } from '../lib/utils';
@@ -218,6 +219,23 @@ export function TodayView({
       });
     } catch (error) {
       console.error("Erro ao concluir tarefa", error);
+    }
+  };
+
+  // Excluir Tarefa
+  const handleDeleteTask = async (taskId: string) => {
+    if (!confirm('Deseja excluir permanentemente esta tarefa?')) return;
+    try {
+      if (activeTimer?.taskId === taskId) {
+        setActiveTimer(null);
+        await updateDoc(doc(db, 'users', profile.uid), {
+          'dailyState.currentTaskId': null,
+          'dailyState.active': false
+        });
+      }
+      await deleteDoc(doc(db, 'tasks', taskId));
+    } catch (e) {
+      console.error("Erro ao excluir tarefa", e);
     }
   };
 
@@ -633,10 +651,18 @@ export function TodayView({
 
                           <button 
                             onClick={() => handleCompleteTask(slot.task!)}
-                            className="p-2.5 rounded-lg bg-accent-emerald/10 text-accent-emerald border border-accent-emerald/30 hover:bg-accent-emerald hover:text-background transition-colors"
+                            className="apple-press p-2.5 rounded-xl bg-accent-emerald/15 text-accent-emerald border border-accent-emerald/30 hover:bg-accent-emerald hover:text-background transition-all"
                             title="Marcar como Concluída"
                           >
                             <Check className="w-4 h-4" />
+                          </button>
+
+                          <button 
+                            onClick={() => handleDeleteTask(slot.task!.id!)}
+                            className="apple-press p-2.5 rounded-xl bg-white/5 border border-white/10 text-white/40 hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10 transition-all"
+                            title="Excluir Tarefa"
+                          >
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
                       )}

@@ -3,9 +3,9 @@ import { Task, UserProfile, UnforeseenEvent, LifeArea, Priority } from '../types
 import { distributeTasks } from '../lib/smartScheduler';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isToday, parseISO } from 'date-fns';
 import { cn } from '../lib/utils';
-import { X, Edit2, Check, Clock } from 'lucide-react';
+import { X, Edit2, Check, Clock, Trash2 } from 'lucide-react';
 import { db } from '../firebase';
-import { doc, updateDoc } from 'firebase/firestore';
+import { doc, updateDoc, deleteDoc } from 'firebase/firestore';
 
 interface MonthlyViewProps {
   profile: UserProfile;
@@ -76,6 +76,15 @@ export function MonthlyView({ profile, tasks, unforeseenEvents }: MonthlyViewPro
       });
     } catch (error) {
       console.error("Error completing task", error);
+    }
+  };
+
+  const handleDeleteTask = async (taskId: string) => {
+    if (!confirm('Deseja excluir esta tarefa?')) return;
+    try {
+      await deleteDoc(doc(db, 'tasks', taskId));
+    } catch (error) {
+      console.error("Error deleting task", error);
     }
   };
 
@@ -190,12 +199,19 @@ export function MonthlyView({ profile, tasks, unforeseenEvents }: MonthlyViewPro
                       {task.status === 'pending' && (
                         <button 
                           onClick={() => handleComplete(task)} 
-                          className="p-2 rounded-lg bg-accent-emerald/10 text-accent-emerald border border-accent-emerald/30 hover:bg-accent-emerald hover:text-background transition-colors" 
+                          className="apple-press p-2 rounded-lg bg-accent-emerald/10 text-accent-emerald border border-accent-emerald/30 hover:bg-accent-emerald hover:text-background transition-colors" 
                           title="Concluir"
                         >
                           <Check className="w-4 h-4" />
                         </button>
                       )}
+                      <button 
+                        onClick={() => handleDeleteTask(task.id!)} 
+                        className="apple-press p-2 rounded-lg bg-surface border border-border hover:border-red-500 hover:text-red-400 text-gray-500 transition-colors" 
+                        title="Excluir"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
                 ))
