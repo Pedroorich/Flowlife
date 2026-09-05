@@ -88,7 +88,7 @@ service cloud.firestore {
     function isValidUser(data) {
       return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
              data.dailyCapacity is number && data.dailyCapacity > 0 && data.dailyCapacity <= 1440 &&
-             data.activeAreas is list && data.activeAreas.size() <= 10 &&
+             data.activeAreas is list && data.activeAreas.size() <= 15 &&
              data.onboardingCompleted is bool &&
              data.uid == request.auth.uid;
     }
@@ -107,8 +107,25 @@ service cloud.firestore {
              (!('dateAllocated' in data) || (data.dateAllocated is string && data.dateAllocated.size() <= 20)) &&
              (!('isFixed' in data) || data.isFixed is bool) &&
              (!('parentTaskId' in data) || (data.parentTaskId is string && data.parentTaskId.size() < 50)) &&
+             (!('projectId' in data) || (data.projectId is string && data.projectId.size() < 50)) &&
              data.userId == request.auth.uid &&
              data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() < 50;
+    }
+
+    function isValidProject(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 150 &&
+             data.area is string && data.area.size() > 0 && data.area.size() < 50 &&
+             data.status in ['active', 'paused', 'completed'] &&
+             data.userId == request.auth.uid &&
+             data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() < 50;
+    }
+
+    function isValidRoutine(data) {
+      return data.title is string && data.title.size() > 0 && data.title.size() < 150 &&
+             data.area is string && data.area.size() > 0 && data.area.size() < 50 &&
+             data.startTime is string && data.startTime.size() <= 10 &&
+             data.endTime is string && data.endTime.size() <= 10 &&
+             data.userId == request.auth.uid;
     }
 
     function isValidUnforeseenEvent(data) {
@@ -133,6 +150,20 @@ service cloud.firestore {
       allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
       allow create: if isAuthenticated() && hasRequiredFields(['title', 'type', 'area', 'priority', 'timeEstimate', 'status', 'userId', 'createdAt']) && isValidTask(request.resource.data) && userIdUnchanged();
       allow update: if isDocOwner() && isValidTask(request.resource.data) && userIdNotModified() && createdAtNotModified();
+      allow delete: if isDocOwner();
+    }
+
+    match /projects/{projectId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && hasRequiredFields(['name', 'area', 'status', 'userId', 'createdAt']) && isValidProject(request.resource.data) && userIdUnchanged();
+      allow update: if isDocOwner() && isValidProject(request.resource.data) && userIdNotModified() && createdAtNotModified();
+      allow delete: if isDocOwner();
+    }
+
+    match /routines/{routineId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && hasRequiredFields(['title', 'area', 'startTime', 'endTime', 'userId']) && isValidRoutine(request.resource.data) && userIdUnchanged();
+      allow update: if isDocOwner() && isValidRoutine(request.resource.data) && userIdNotModified();
       allow delete: if isDocOwner();
     }
 

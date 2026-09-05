@@ -1,206 +1,247 @@
-import React, { useState, useEffect } from 'react';
-import { Task, UserProfile, UnforeseenEvent, LifeArea, Priority } from '../types';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Task, UserProfile, UnforeseenEvent, RoutineBlock, Project } from '../types';
 import { db } from '../firebase';
 import { doc, updateDoc, addDoc, collection } from 'firebase/firestore';
-import { Play, Check, Clock, AlertCircle, AlertTriangle, Edit2, PlayCircle } from 'lucide-react';
-import { format, parseISO } from 'date-fns';
+import { 
+  Play, 
+  Check, 
+  Clock, 
+  AlertTriangle, 
+  Edit2, 
+  PlayCircle, 
+  Sparkles, 
+  Pause, 
+  RotateCcw, 
+  ArrowRight, 
+  AlertCircle,
+  Calendar,
+  Layers,
+  Flame,
+  ShieldAlert,
+  Coffee,
+  Car
+} from 'lucide-react';
+import { format, parseISO, isSameDay } from 'date-fns';
 import { cn, sendBrowserNotification } from '../lib/utils';
-import { distributeTasks } from '../lib/scheduler';
+import { buildDailyTimeline, DailyTimelineResult, TimeSlot } from '../lib/smartScheduler';
+import { calculateRealPriority } from '../lib/priorityEngine';
 
 interface TodayViewProps {
   profile: UserProfile;
   tasks: Task[];
   unforeseenEvents: UnforeseenEvent[];
+  routines?: RoutineBlock[];
+  projects?: Project[];
 }
 
-export function TodayView({ profile, tasks, unforeseenEvents }: TodayViewProps) {
-  const [activeTimer, setActiveTimer] = useState<{ taskId: string, timeLeft: number } | null>(null);
-  const [schedule, setSchedule] = useState<Record<string, Task[]>>({});
-  
-  // Imprevisto State
+export function TodayView({ 
+  profile, 
+  tasks, 
+  unforeseenEvents, 
+  routines = [],
+  projects = [] 
+}: TodayViewProps) {
+  const todayDate = useMemo(() => new Date(), []);
+  const todayStr = format(todayDate, 'yyyy-MM-dd');
+
+  // Estado da Timeline Inteligente
+  const [timeline, setTimeline] = useState<DailyTimelineResult>(() => 
+    buildDailyTimeline(todayDate, tasks, profile, routines, unforeseenEvents)
+  );
+
+  // Timer & Modo Foco State
+  const [activeTimer, setActiveTimer] = useState<{ 
+    taskId: string; 
+    timeLeft: number; 
+    totalSeconds: number;
+    isPaused: boolean;
+  } | null>(null);
+
+  // Overthinking Alert State
+  const [showOverthinkingModal, setShowOverthinkingModal] = useState(false);
+  const [overthinkingTask, setOverthinkingTask] = useState<Task | null>(null);
+
+  // Modais de Imprevisto e Interrupção
   const [showImprevistoModal, setShowImprevistoModal] = useState(false);
   const [imprevistoDesc, setImprevistoDesc] = useState('');
-  const [imprevistoDuration, setImprevistoDuration] = useState(60);
+  const [imprevistoDuration, setImprevistoDuration] = useState(45);
 
-  // Edit Task State
+  const [showInterruptionModal, setShowInterruptionModal] = useState(false);
+  const [interruptionDesc, setInterruptionDesc] = useState('');
+  const [interruptionDuration, setInterruptionDuration] = useState(15);
+
+  // Edição de Tarefa
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [editForm, setEditForm] = useState<Partial<Task>>({});
 
+  // Recalcular Timeline quando tasks, rotinas ou imprevistos mudarem
   useEffect(() => {
-    const newSchedule = distributeTasks(tasks, profile.dailyCapacity, unforeseenEvents);
-    setSchedule(newSchedule);
-  }, [tasks, profile.dailyCapacity, unforeseenEvents]);
+    const updated = buildDailyTimeline(todayDate, tasks, profile, routines, unforeseenEvents);
+    setTimeline(updated);
+  }, [tasks, profile, routines, unforeseenEvents, todayDate]);
 
-  const todayStr = format(new Date(), 'yyyy-MM-dd');
-  const todaysTasks = schedule[todayStr] || [];
-  
-  const overdueTasks = tasks.filter(t => 
-    t.status === 'pending' && 
-    parseISO(t.deadline || t.endDate || '2099-01-01').getTime() < new Date().setHours(0,0,0,0) &&
-    !todaysTasks.find(td => td.id === t.id)
-  );
-
-  const allTodayTasks = [...overdueTasks, ...todaysTasks];
-  
-  const completedToday = tasks.filter(t => 
-    t.status === 'completed' && 
-    t.dateAllocated === todayStr
-  ).length;
-
-  const totalToday = allTodayTasks.length + completedToday;
-  const progress = totalToday === 0 ? 0 : Math.round((completedToday / totalToday) * 100);
-
-  const isDayActive = profile.dailyState?.date === todayStr && profile.dailyState?.active === true;
-
-  // Sincronizar o activeTimer com o dailyState se aplicável
+  // Sincronizar activeTimer com o dailyState
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (activeTimer && activeTimer.timeLeft > 0) {
+    if (activeTimer && !activeTimer.isPaused && activeTimer.timeLeft > 0) {
       interval = setInterval(() => {
-        setActiveTimer(prev => prev ? { ...prev, timeLeft: prev.timeLeft - 1 } : null);
+        setActiveTimer(prev => {
+          if (!prev) return null;
+          const newTimeLeft = prev.timeLeft - 1;
+          const elapsed = prev.totalSeconds - newTimeLeft;
+
+          // Checar se atingiu o Limite Máximo (Overthinking)
+          const currentTask = tasks.find(t => t.id === prev.taskId);
+          const maxAllowedSeconds = (currentTask?.timeMax || currentTask?.timeEstimate * 1.5 || 60) * 60;
+
+          if (elapsed >= maxAllowedSeconds && !showOverthinkingModal && currentTask) {
+            setOverthinkingTask(currentTask);
+            setShowOverthinkingModal(true);
+            sendBrowserNotification('FlowLife - Alerta de Overthinking', {
+              body: `Você ultrapassou o limite máximo para "${currentTask.title}". Hora de decidir se conclui ou realoca!`
+            });
+          }
+
+          return { ...prev, timeLeft: newTimeLeft };
+        });
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [activeTimer]);
+  }, [activeTimer, showOverthinkingModal, tasks]);
 
+  // Checagem de Notificações Locais (5 min e Encerramento)
   useEffect(() => {
-    if (isDayActive && profile.dailyState?.currentTaskId && profile.dailyState?.taskEndTime) {
-      const msLeft = parseISO(profile.dailyState.taskEndTime).getTime() - Date.now();
-      if (msLeft > 0) {
-        if (!activeTimer || activeTimer.taskId !== profile.dailyState.currentTaskId) {
-          setActiveTimer({ taskId: profile.dailyState.currentTaskId, timeLeft: Math.floor(msLeft / 1000) });
-        }
-      } else {
-        // Tempo expirado, mantenha como zero até o usuário confirmar
-        if (!activeTimer || activeTimer.taskId !== profile.dailyState.currentTaskId) {
-          setActiveTimer({ taskId: profile.dailyState.currentTaskId, timeLeft: 0 });
-        }
-      }
-    }
-  }, [profile.dailyState, isDayActive]);
-
-  // Checagem de notificações locais para o timer ativo
-  useEffect(() => {
-    if (!isDayActive || !profile.dailyState?.currentTaskId || !activeTimer) return;
+    if (!profile.dailyState?.active || !profile.dailyState?.currentTaskId || !activeTimer) return;
     
     const { timeLeft } = activeTimer;
-    const task = allTodayTasks.find(t => t.id === profile.dailyState.currentTaskId);
+    const task = tasks.find(t => t.id === profile.dailyState?.currentTaskId);
     if (!task) return;
 
     if (timeLeft <= 300 && timeLeft > 0 && !profile.dailyState.notified5Min) {
-      sendBrowserNotification('FlowLife', { body: `Faltam 5 minutos para encerrar a tarefa: ${task.title}` });
+      sendBrowserNotification('FlowLife', { 
+        body: `Faltam 5 minutos para encerrar a tarefa: ${task.title}` 
+      });
       updateDoc(doc(db, 'users', profile.uid), {
         'dailyState.notified5Min': true
       }).catch(console.error);
     } else if (timeLeft <= 0 && !profile.dailyState.notifiedEnd) {
-      sendBrowserNotification('FlowLife', { body: `Tarefa "${task.title}" encerrada. Retorne ao app para começar a próxima!` });
+      sendBrowserNotification('FlowLife', { 
+        body: `Tarefa "${task.title}" encerrada. Retorne ao app para começar a próxima!` 
+      });
       updateDoc(doc(db, 'users', profile.uid), {
         'dailyState.notifiedEnd': true
       }).catch(console.error);
     }
-  }, [activeTimer?.timeLeft, profile.dailyState, isDayActive, allTodayTasks, profile.uid]);
+  }, [activeTimer?.timeLeft, profile.dailyState, tasks, profile.uid]);
 
-  const startTask = async (task: Task) => {
-    const endTime = new Date(Date.now() + task.timeEstimate * 60000).toISOString();
-    try {
-      await updateDoc(doc(db, 'users', profile.uid), {
-        'dailyState.currentTaskId': task.id,
-        'dailyState.taskEndTime': endTime,
-        'dailyState.notified5Min': false,
-        'dailyState.notifiedEnd': false
-      });
-      setActiveTimer({ taskId: task.id!, timeLeft: task.timeEstimate * 60 });
-      
-      // Notificação local
-      sendBrowserNotification('FlowLife', { body: `Iniciando tarefa: ${task.title}` });
-      
-      // Fire webhook
-      if (profile.webhookUrlStart) {
-         fetch(profile.webhookUrlStart, {
-           method: 'POST',
-           mode: 'no-cors',
-           headers: { 'Content-Type': 'application/json' },
-           body: JSON.stringify({ evento: "atividadeIniciada", tarefa: task.title })
-         }).catch(console.error);
-      }
-    } catch (error) {
-      console.error("Error starting task", error);
-    }
-  };
+  // Iniciar Tarefa no Modo Foco
+  const handleStartTask = async (task: Task) => {
+    const totalMinutes = task.timeEstimate || 30;
+    const endTime = new Date(Date.now() + totalMinutes * 60000).toISOString();
 
-  const startDay = async () => {
-    if (allTodayTasks.length === 0) return;
-    const firstTask = allTodayTasks[0];
-    const endTime = new Date(Date.now() + firstTask.timeEstimate * 60000).toISOString();
-    
     try {
       await updateDoc(doc(db, 'users', profile.uid), {
         dailyState: {
           date: todayStr,
           active: true,
-          currentTaskId: firstTask.id,
+          currentTaskId: task.id,
+          taskStartTime: new Date().toISOString(),
           taskEndTime: endTime,
           notified5Min: false,
           notifiedEnd: false
         }
       });
-      setActiveTimer({ taskId: firstTask.id!, timeLeft: firstTask.timeEstimate * 60 });
 
-      // Notificação local
-      sendBrowserNotification('FlowLife', { body: `Iniciando o dia. Primeira tarefa: ${firstTask.title}` });
+      setActiveTimer({
+        taskId: task.id!,
+        timeLeft: totalMinutes * 60,
+        totalSeconds: totalMinutes * 60,
+        isPaused: false
+      });
 
+      sendBrowserNotification('FlowLife', { 
+        body: `Iniciando: ${task.title} (${totalMinutes} min planejados)` 
+      });
+
+      // Disparo do Webhook de Início
       if (profile.webhookUrlStart) {
-         fetch(profile.webhookUrlStart, {
-           method: 'POST',
-           mode: 'no-cors',
-           headers: { 'Content-Type': 'application/json' },
-           body: JSON.stringify({ evento: "diaIniciado", tarefa: firstTask.title })
-         }).catch(console.error);
+        fetch(profile.webhookUrlStart, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            evento: "atividadeIniciada", 
+            tarefa: task.title,
+            tempoEstimado: totalMinutes
+          })
+        }).catch(console.error);
       }
     } catch (e) {
-      console.error("Error starting day", e);
+      console.error("Erro ao iniciar tarefa:", e);
     }
   };
 
-  const handleStartTimer = (task: Task) => {
-    if (activeTimer?.taskId === task.id) {
-      // Pause is not fully supported with global taskEndTime yet, but we will reset activeTimer locally
-      setActiveTimer(null);
-    } else {
-      startTask(task);
-    }
-  };
-
-  const handleComplete = async (task: Task) => {
+  // Concluir Tarefa com registro de tempo real
+  const handleCompleteTask = async (task: Task) => {
     if (!task.id) return;
     try {
+      let actualMinutes = task.timeEstimate;
+      if (activeTimer && activeTimer.taskId === task.id) {
+        const elapsedSeconds = activeTimer.totalSeconds - activeTimer.timeLeft;
+        actualMinutes = Math.max(1, Math.round(elapsedSeconds / 60));
+      }
+
       await updateDoc(doc(db, 'tasks', task.id), {
         status: 'completed',
-        dateAllocated: todayStr
+        dateAllocated: todayStr,
+        actualDuration: actualMinutes
       });
-      
-      const newAllTasks = allTodayTasks.filter(t => t.id !== task.id);
-      
-      if (activeTimer?.taskId === task.id) {
-        if (newAllTasks.length > 0) {
-          // Iniciar proxima tarefa automaticamente
-          const nextTask = newAllTasks[0];
-          await startTask(nextTask);
-        } else {
-          // Limpa estado
-          await updateDoc(doc(db, 'users', profile.uid), {
-            'dailyState.currentTaskId': null,
-            'dailyState.active': false
-          });
-          setActiveTimer(null);
-        }
+
+      // Atualizar última atividade no projeto (se houver)
+      if (task.projectId) {
+        await updateDoc(doc(db, 'projects', task.projectId), {
+          lastActivityDate: new Date().toISOString()
+        }).catch(() => {});
       }
+
+      // Limpar timer se for a tarefa ativa
+      if (activeTimer?.taskId === task.id) {
+        setActiveTimer(null);
+        await updateDoc(doc(db, 'users', profile.uid), {
+          'dailyState.currentTaskId': null,
+          'dailyState.active': false
+        });
+      }
+
+      sendBrowserNotification('FlowLife', { 
+        body: `Tarefa concluída: "${task.title}" em ${actualMinutes} minutos!` 
+      });
     } catch (error) {
-      console.error("Error completing task", error);
+      console.error("Erro ao concluir tarefa", error);
     }
   };
 
-  const handleAddImprevisto = async (e: React.FormEvent) => {
+  // Realocar tarefas que estouram o encerramento das 19:00 para amanhã
+  const handleReallocateOverloadToTomorrow = async () => {
+    if (timeline.suggestedReallocations.length === 0) return;
+    const tomorrowStr = format(new Date(Date.now() + 86400000), 'yyyy-MM-dd');
+
+    try {
+      for (const t of timeline.suggestedReallocations) {
+        if (t.id) {
+          await updateDoc(doc(db, 'tasks', t.id), {
+            dateAllocated: tomorrowStr
+          });
+        }
+      }
+      alert(`${timeline.suggestedReallocations.length} tarefas realocadas para amanhã para manter seu horário de encerramento das 19:00.`);
+    } catch (e) {
+      console.error("Erro ao realocar tarefas", e);
+    }
+  };
+
+  // Registrar Imprevisto
+  const handleSaveImprevisto = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!imprevistoDesc || imprevistoDuration <= 0) return;
 
@@ -214,281 +255,512 @@ export function TodayView({ profile, tasks, unforeseenEvents }: TodayViewProps) 
       });
       setShowImprevistoModal(false);
       setImprevistoDesc('');
-      setImprevistoDuration(60);
+      setImprevistoDuration(45);
     } catch (error) {
-      console.error("Error adding unforeseen event", error);
+      console.error("Erro ao adicionar imprevisto", error);
     }
   };
 
-  const handleEditClick = (task: Task) => {
-    setEditingTask(task);
-    setEditForm({
-      title: task.title,
-      area: task.area,
-      priority: task.priority,
-      timeEstimate: task.timeEstimate,
-      notes: task.notes || ''
-    });
-  };
-
-  const handleSaveEdit = async (e: React.FormEvent) => {
+  // Registrar Interrupção durante uma tarefa
+  const handleSaveInterruption = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingTask?.id) return;
+    if (!interruptionDesc || interruptionDuration <= 0) return;
+
     try {
-      await updateDoc(doc(db, 'tasks', editingTask.id), {
-        title: editForm.title,
-        area: editForm.area,
-        priority: editForm.priority,
-        timeEstimate: Number(editForm.timeEstimate),
-        notes: editForm.notes || '',
+      await addDoc(collection(db, 'unforeseen_events'), {
+        userId: profile.uid,
+        date: todayStr,
+        duration: interruptionDuration,
+        description: `Interrupção: ${interruptionDesc}`,
+        createdAt: new Date().toISOString()
       });
-      setEditingTask(null);
+
+      // Se houver timer ativo, adicionar tempo equivalente ou pausar
+      if (activeTimer) {
+        setActiveTimer(prev => prev ? { ...prev, isPaused: true } : null);
+      }
+
+      setShowInterruptionModal(false);
+      setInterruptionDesc('');
+      setInterruptionDuration(15);
     } catch (error) {
-      console.error("Error updating task", error);
+      console.error("Erro ao registrar interrupção", error);
     }
   };
 
-  const formatTime = (seconds: number) => {
+  const formatSeconds = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const areaColors: Record<string, string> = {
-    "Trabalho": "bg-blue-500/20 text-blue-400 border-blue-500/30",
-    "Estudos": "bg-purple-500/20 text-purple-400 border-purple-500/30",
-    "Saúde & Bem-estar": "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
-    "Finanças": "bg-amber-500/20 text-amber-400 border-amber-500/30",
-    "Casa & Família": "bg-pink-500/20 text-pink-400 border-pink-500/30",
-    "Projetos Pessoais": "bg-indigo-500/20 text-indigo-400 border-indigo-500/30",
-    "Social & Relacionamentos": "bg-orange-500/20 text-orange-400 border-orange-500/30",
-    "Outro": "bg-gray-500/20 text-gray-400 border-gray-500/30",
-  };
+  const completedTodayCount = tasks.filter(t => t.status === 'completed' && t.dateAllocated === todayStr).length;
+  const pendingTodayTasks = tasks.filter(t => {
+    if (t.status === 'completed') return false;
+    return t.dateAllocated === todayStr || (t.deadline && isSameDay(parseISO(t.deadline), todayDate));
+  });
 
-  const todayEvents = unforeseenEvents.filter(e => e.date === todayStr);
-  const lostTime = todayEvents.reduce((acc, e) => acc + e.duration, 0);
+  const totalTodayTasks = completedTodayCount + pendingTodayTasks.length;
+  const progressPercent = totalTodayTasks === 0 ? 0 : Math.round((completedTodayCount / totalTodayTasks) * 100);
+
+  // Tarefa ativa atual
+  const activeTask = activeTimer ? tasks.find(t => t.id === activeTimer.taskId) : null;
 
   return (
-    <div className="max-w-3xl mx-auto relative">
-      <div className="mb-8 flex flex-col md:flex-row md:items-end justify-between gap-4">
+    <div className="max-w-4xl mx-auto space-y-8 pb-12">
+      {/* 1. Header Estratégico com Horário de Encerramento */}
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
-          <h2 className="font-serif text-3xl mb-2 text-accent-amber">Bom dia, {profile.name.split(' ')[0]}!</h2>
-          <p className="text-gray-400">
-            Você tem {allTodayTasks.length} tarefas pendentes hoje. 
-            {progress === 100 && totalToday > 0 ? " Excelente trabalho!" : " Vamos ao foco."}
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-accent-amber/20 text-accent-amber border border-accent-amber/30">
+              Sistema de Comando Diário
+            </span>
+            <span className="text-xs text-gray-400">
+              {format(todayDate, 'EEEE, d MMMM')}
+            </span>
+          </div>
+          <h2 className="font-serif text-3xl text-white">
+            Bom dia, <span className="text-accent-amber">{profile.name.split(' ')[0]}</span>
+          </h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Horário inegociável de encerramento: <strong className="text-white">{profile.workEndTime || '19:00'}</strong>.
+            Sua saúde e seu tempo pessoal são restrições do sistema.
           </p>
         </div>
-        <button 
-          onClick={() => setShowImprevistoModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-red-500/10 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/20 transition-colors text-sm font-medium"
-        >
-          <AlertTriangle className="w-4 h-4" />
-          Tive um Imprevisto
-        </button>
+
+        {/* Botões de Ação Imediata */}
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={() => setShowInterruptionModal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 bg-yellow-500/10 text-yellow-400 border border-yellow-500/30 rounded-lg hover:bg-yellow-500/20 transition-colors text-xs font-medium"
+          >
+            <Pause className="w-3.5 h-3.5" />
+            Interrupção
+          </button>
+          <button 
+            onClick={() => setShowImprevistoModal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 bg-red-500/10 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/20 transition-colors text-xs font-medium"
+          >
+            <AlertTriangle className="w-3.5 h-3.5" />
+            Tive um Imprevisto
+          </button>
+        </div>
       </div>
 
-      {lostTime > 0 && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 mb-8 flex items-start gap-3">
-          <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-          <div>
-            <h4 className="text-red-400 font-medium">Imprevistos registrados hoje</h4>
-            <p className="text-sm text-red-400/80">
-              Você perdeu {Math.floor(lostTime / 60)}h {lostTime % 60}m hoje. O FlowLife já otimizou e redistribuiu suas tarefas para compensar isso.
-            </p>
+      {/* 2. CARD HERO: "O QUE FAZER AGORA?" (Next Action Engine) */}
+      <div className="bg-gradient-to-br from-surface to-background border-2 border-accent-amber/40 rounded-2xl p-6 shadow-[0_0_30px_rgba(245,158,11,0.08)] relative overflow-hidden">
+        <div className="absolute -top-12 -right-12 w-48 h-48 bg-accent-amber/10 rounded-full blur-3xl pointer-events-none" />
+
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10">
+          <div className="flex-1">
+            <div className="flex items-center gap-2 text-accent-amber text-xs font-bold uppercase tracking-wider mb-2">
+              <Sparkles className="w-4 h-4" />
+              O que faz mais sentido você fazer agora?
+            </div>
+
+            {activeTask ? (
+              <div>
+                <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded bg-accent-amber/20 text-accent-amber border border-accent-amber/30 text-xs font-semibold mb-2">
+                  <span className="w-2 h-2 rounded-full bg-accent-amber animate-ping" />
+                  EM ANDAMENTO NO MODO FOCO
+                </div>
+                <h3 className="text-2xl font-bold text-white mb-2">{activeTask.title}</h3>
+                <p className="text-sm text-gray-300 line-clamp-2">
+                  {activeTask.notes || 'Mantenha o foco profundo até o encerramento do bloco.'}
+                </p>
+              </div>
+            ) : timeline.nextAction ? (
+              <div>
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <span className="text-xs px-2.5 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30 font-medium">
+                    {timeline.nextAction.task.area}
+                  </span>
+                  <span className="text-xs text-gray-400 flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5" /> {timeline.nextAction.task.timeEstimate} min
+                  </span>
+                  {timeline.nextAction.task.projectId && (
+                    <span className="text-xs px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 font-medium">
+                      {projects.find(p => p.id === timeline.nextAction?.task.projectId)?.name || 'Projeto'}
+                    </span>
+                  )}
+                </div>
+                <h3 className="text-2xl font-bold text-white mb-2">{timeline.nextAction.task.title}</h3>
+                <div className="bg-white/5 border border-white/10 rounded-lg p-3 text-xs text-gray-300 flex items-start gap-2">
+                  <Flame className="w-4 h-4 text-accent-amber shrink-0 mt-0.5" />
+                  <div>
+                    <strong>Por que esta tarefa agora?</strong> {timeline.nextAction.reason}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <h3 className="text-xl font-medium text-white mb-1">Tudo em dia por enquanto! ✨</h3>
+                <p className="text-sm text-gray-400">
+                  Nenhuma tarefa pendente precisa da sua atenção imediata agora. Aproveite para descansar ou revisar o Backlog.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Botão de Início / Timer Ativo */}
+          <div className="flex flex-col items-center justify-center shrink-0">
+            {activeTimer && activeTask ? (
+              <div className="flex flex-col items-center gap-3">
+                <div className="text-4xl font-mono font-bold text-accent-amber tracking-wider">
+                  {formatSeconds(activeTimer.timeLeft)}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => setActiveTimer(prev => prev ? { ...prev, isPaused: !prev.isPaused } : null)}
+                    className="p-2.5 rounded-xl bg-surface border border-border hover:border-gray-500 text-gray-300 transition-colors"
+                    title={activeTimer.isPaused ? "Retomar" : "Pausar"}
+                  >
+                    {activeTimer.isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+                  </button>
+                  <button 
+                    onClick={() => handleCompleteTask(activeTask)}
+                    className="px-5 py-2.5 bg-accent-emerald text-background font-bold rounded-xl hover:bg-emerald-400 transition-all flex items-center gap-2 shadow-lg shadow-emerald-500/20"
+                  >
+                    <Check className="w-4 h-4" /> Concluir Tarefa
+                  </button>
+                </div>
+              </div>
+            ) : timeline.nextAction ? (
+              <button 
+                onClick={() => handleStartTask(timeline.nextAction!.task)}
+                className="px-8 py-4 bg-accent-amber text-background font-bold text-base rounded-xl hover:bg-amber-400 hover:scale-105 transition-all flex items-center gap-3 shadow-[0_0_20px_rgba(245,158,11,0.25)]"
+              >
+                <PlayCircle className="w-6 h-6" />
+                Iniciar no Modo Foco
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      {/* 3. ALERTA DE AGENDA IMPOSSÍVEL / SOBRECARGA */}
+      {timeline.isOverloaded && (
+        <div className="bg-red-500/10 border-2 border-red-500/30 rounded-2xl p-5 animate-in fade-in slide-in-from-top-2">
+          <div className="flex items-start gap-4">
+            <div className="p-2.5 rounded-xl bg-red-500/20 text-red-400 shrink-0">
+              <ShieldAlert className="w-6 h-6" />
+            </div>
+            <div className="flex-1">
+              <h4 className="text-base font-bold text-red-400 mb-1">
+                Alerta de Agenda Impossível Detectada
+              </h4>
+              <p className="text-sm text-red-300/90 leading-relaxed mb-4">
+                Você tem <strong>{Math.round(timeline.totalPlannedWorkMinutes / 60 * 10) / 10}h</strong> de trabalho planejado para apenas <strong>{Math.round(timeline.totalAvailableWorkMinutes / 60 * 10) / 10}h</strong> disponíveis antes do encerramento das {profile.workEndTime || '19:00'}.
+                Para não sacrificar sua saúde e compromissos, recomendamos realocar o excedente:
+              </p>
+
+              <div className="space-y-2 mb-4">
+                {timeline.suggestedReallocations.map(t => (
+                  <div key={t.id} className="flex items-center justify-between text-xs bg-red-950/40 border border-red-500/20 px-3 py-2 rounded-lg">
+                    <span className="font-medium text-red-200">{t.title}</span>
+                    <span className="text-red-400 font-mono">+{t.timeEstimate} min</span>
+                  </div>
+                ))}
+              </div>
+
+              <button 
+                onClick={handleReallocateOverloadToTomorrow}
+                className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white font-medium rounded-lg text-xs transition-colors flex items-center gap-2"
+              >
+                <ArrowRight className="w-3.5 h-3.5" />
+                Mover Excedentes para Amanhã
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Progress Bar */}
-      <div className="bg-surface border border-border rounded-xl p-6 mb-8">
-        <div className="flex justify-between text-sm mb-2">
-          <span className="text-gray-400">Progresso do dia</span>
-          <span className="font-medium">{completedToday} de {totalToday} concluídas ({progress}%)</span>
+      {/* 4. Barra de Progresso do Dia */}
+      <div className="bg-surface border border-border rounded-xl p-5">
+        <div className="flex justify-between items-center text-xs mb-2">
+          <span className="text-gray-400 font-medium">Progresso de Hoje</span>
+          <span className="font-mono text-accent-emerald font-bold">
+            {completedTodayCount} de {totalTodayTasks} concluídas ({progressPercent}%)
+          </span>
         </div>
-        <div className="w-full bg-background rounded-full h-3 overflow-hidden">
+        <div className="w-full bg-background rounded-full h-2.5 overflow-hidden">
           <div 
-            className="bg-accent-emerald h-full transition-all duration-1000 ease-out"
-            style={{ width: `${progress}%` }}
+            className="bg-accent-emerald h-full transition-all duration-700 ease-out rounded-full"
+            style={{ width: `${progressPercent}%` }}
           />
         </div>
       </div>
 
-      {/* Task List or Block Screen */}
-      <div className="space-y-4">
-        {allTodayTasks.length === 0 ? (
-          <div className="text-center py-12 border border-dashed border-border rounded-xl">
-            <div className="text-4xl mb-4">✨</div>
-            <h3 className="text-xl font-medium mb-2">Tudo limpo por aqui!</h3>
-            <p className="text-gray-400">Você não tem tarefas agendadas para hoje.</p>
-          </div>
-        ) : !isDayActive ? (
-          <div className="flex flex-col items-center justify-center py-16 bg-surface border border-border rounded-xl px-4 text-center">
-            <div className="w-16 h-16 bg-accent-amber/20 rounded-full flex items-center justify-center mb-6">
-              <PlayCircle className="w-8 h-8 text-accent-amber" />
-            </div>
-            <h3 className="font-serif text-2xl text-accent-amber mb-2">Pronto para começar?</h3>
-            <p className="text-gray-400 max-w-sm mb-8">
-              Suas tarefas do dia estão programadas. Quando clicar em Iniciar, os temporizadores e automações de webhook começarão a contar.
+      {/* 5. TIMELINE DIÁRIA INTELIGENTE (Visualização Cronológica com Encerramento) */}
+      <div className="bg-surface border border-border rounded-2xl p-6">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h3 className="font-serif text-xl text-white">Timeline da sua Rotina</h3>
+            <p className="text-xs text-gray-400">
+              Rotinas inegociáveis, deslocamentos e blocos de trabalho organizados dinamicamente.
             </p>
-            <button 
-              onClick={startDay}
-              className="px-8 py-4 bg-accent-amber text-background rounded-full font-bold text-lg hover:scale-105 transition-transform shadow-[0_0_20px_rgba(245,158,11,0.2)]"
-            >
-              Iniciar Atividades
-            </button>
           </div>
-        ) : (
-          allTodayTasks.map(task => {
-            const isOverdue = parseISO(task.deadline || task.endDate || '2099-01-01').getTime() < new Date().setHours(0,0,0,0);
-            const isActive = activeTimer?.taskId === task.id;
-            
+          <div className="text-xs text-gray-500 font-mono">
+            {timeline.slots.length} blocos mapeados
+          </div>
+        </div>
+
+        <div className="space-y-3 relative before:absolute before:top-3 before:bottom-3 before:left-8 before:w-0.5 before:bg-border">
+          {timeline.slots.map((slot) => {
+            const isCutoff = slot.type === 'boundary';
+            const isRoutine = slot.type === 'routine' || slot.type === 'meal';
+            const isTransit = slot.type === 'transit';
+            const isTask = slot.type === 'task' || slot.type === 'fixed_commitment';
+            const isRunning = activeTimer?.taskId === slot.taskId;
+
             return (
               <div 
-                key={task.id} 
+                key={slot.id} 
                 className={cn(
-                  "bg-surface border rounded-xl p-4 md:p-6 transition-all",
-                  isActive ? "border-accent-amber shadow-[0_0_15px_rgba(245,158,11,0.1)]" : "border-border hover:border-gray-600"
+                  "relative pl-14 transition-all",
+                  isCutoff && "my-6"
                 )}
               >
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div className="flex-1">
-                    <div className="flex flex-wrap items-center gap-2 mb-2">
-                      <span className={cn("text-xs px-2 py-1 rounded border", areaColors[task.area] || areaColors["Outro"])}>
-                        {task.area}
-                      </span>
-                      {isOverdue && (
-                        <span className="text-xs px-2 py-1 rounded border bg-red-500/20 text-red-400 border-red-500/30 flex items-center gap-1">
-                          <AlertCircle className="w-3 h-3" /> Atrasado
-                        </span>
-                      )}
-                      {task.isFixed && (
-                        <span className="text-xs px-2 py-1 rounded border bg-blue-500/20 text-blue-400 border-blue-500/30">
-                          Fixo
-                        </span>
-                      )}
-                      <span className="text-xs text-gray-500 flex items-center gap-1">
-                        <Clock className="w-3 h-3" /> {task.timeEstimate} min
-                      </span>
-                    </div>
-                    <h3 className="text-lg font-medium">{task.title}</h3>
-                    {task.notes && <p className="text-sm text-gray-400 mt-1 line-clamp-2">{task.notes}</p>}
-                  </div>
+                {/* Marcador do Ponto na Linha do Tempo */}
+                <div className={cn(
+                  "absolute left-6 top-3.5 -translate-x-1/2 w-4 h-4 rounded-full border-2 bg-background flex items-center justify-center text-[9px] font-bold z-10",
+                  isCutoff ? "border-red-500 bg-red-500 text-white w-5 h-5 left-6" :
+                  isRunning ? "border-accent-amber bg-accent-amber animate-ping" :
+                  isRoutine ? "border-purple-500 text-purple-400" :
+                  isTransit ? "border-blue-400 text-blue-400" :
+                  "border-accent-emerald text-accent-emerald"
+                )} />
 
-                  <div className="flex items-center gap-2 md:gap-3">
-                    {isActive ? (
-                      <div className="flex flex-col md:flex-row items-center gap-3 bg-background px-4 py-2 rounded-lg border border-accent-amber">
-                        <span className={cn("font-mono text-xl", activeTimer.timeLeft === 0 ? "text-red-500 animate-pulse" : "text-accent-amber")}>
-                          {formatTime(activeTimer.timeLeft)}
+                {/* Bloco de Encerramento Inegociável */}
+                {isCutoff ? (
+                  <div className="bg-red-500/10 border-2 border-dashed border-red-500/40 rounded-xl p-4 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <ShieldAlert className="w-5 h-5 text-red-400" />
+                      <div>
+                        <div className="text-sm font-bold text-red-400">{slot.title}</div>
+                        <div className="text-xs text-red-300/80">A partir deste horário, nenhum novo trabalho é alocado. Hora de descanso e vida pessoal.</div>
+                      </div>
+                    </div>
+                    <span className="font-mono font-bold text-red-400 text-sm">{slot.startTime}</span>
+                  </div>
+                ) : isTransit ? (
+                  /* Deslocamento */
+                  <div className="bg-blue-500/5 border border-blue-500/20 rounded-xl px-4 py-2.5 flex items-center justify-between text-xs text-blue-300">
+                    <div className="flex items-center gap-2">
+                      <Car className="w-3.5 h-3.5 text-blue-400" />
+                      <span>{slot.title}</span>
+                    </div>
+                    <span className="font-mono text-gray-400">{slot.startTime} – {slot.endTime} ({slot.durationMinutes}m)</span>
+                  </div>
+                ) : isRoutine ? (
+                  /* Rotina Estrutural (Treino, Igreja, Almoço) */
+                  <div className="bg-purple-500/10 border border-purple-500/20 rounded-xl p-4 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-lg bg-purple-500/20 text-purple-400">
+                        {slot.type === 'meal' ? <Coffee className="w-4 h-4" /> : <Flame className="w-4 h-4" />}
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium text-white">{slot.title}</div>
+                        <div className="text-xs text-purple-400">{slot.area} • Bloco Inegociável</div>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-mono text-sm text-gray-300">{slot.startTime} – {slot.endTime}</div>
+                      <div className="text-[11px] text-gray-500">{slot.durationMinutes} min</div>
+                    </div>
+                  </div>
+                ) : (
+                  /* Tarefa Flexível ou Fixa */
+                  <div className={cn(
+                    "bg-background/80 border rounded-xl p-4 transition-all flex flex-col md:flex-row md:items-center justify-between gap-3",
+                    isRunning ? "border-accent-amber shadow-[0_0_20px_rgba(245,158,11,0.15)] ring-1 ring-accent-amber" :
+                    slot.isCompleted ? "border-border/40 opacity-60" : "border-border hover:border-gray-600"
+                  )}>
+                    <div className="flex-1">
+                      <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                        <span className="text-[11px] px-2 py-0.5 rounded bg-white/5 border border-white/10 text-gray-300 font-medium">
+                          {slot.area}
                         </span>
-                        {activeTimer.timeLeft === 0 && (
-                          <span className="text-xs text-red-500 font-medium">Tempo esgotado!</span>
+                        {slot.task?.projectId && (
+                          <span className="text-[11px] px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                            {projects.find(p => p.id === slot.task?.projectId)?.name || 'Projeto'}
+                          </span>
+                        )}
+                        {slot.priorityScore && (
+                          <span className="text-[11px] px-2 py-0.5 rounded bg-accent-amber/15 text-accent-amber border border-accent-amber/25 font-mono font-medium">
+                            Score: {slot.priorityScore}
+                          </span>
+                        )}
+                        {isRunning && (
+                          <span className="text-[11px] px-2 py-0.5 rounded bg-accent-amber text-background font-bold animate-pulse">
+                            RODANDO AGORA
+                          </span>
                         )}
                       </div>
-                    ) : (
-                      <button 
-                        onClick={() => handleStartTimer(task)}
-                        className="p-3 rounded-lg bg-background border border-border hover:border-accent-amber hover:text-accent-amber transition-colors"
-                        title="Iniciar Timer"
-                      >
-                        <Play className="w-5 h-5" />
-                      </button>
-                    )}
-                    
-                    {!isActive && (
-                      <button 
-                        onClick={() => handleEditClick(task)}
-                        className="p-3 rounded-lg bg-background border border-border hover:border-blue-400 hover:text-blue-400 transition-colors"
-                        title="Editar Tarefa"
-                      >
-                        <Edit2 className="w-5 h-5" />
-                      </button>
-                    )}
+                      <h4 className={cn("text-base font-medium text-white", slot.isCompleted && "line-through text-gray-400")}>
+                        {slot.title}
+                      </h4>
+                      {slot.explanation && (
+                        <p className="text-xs text-gray-400 mt-1">{slot.explanation}</p>
+                      )}
+                    </div>
 
-                    <button 
-                      onClick={() => handleComplete(task)}
-                      className="p-3 rounded-lg bg-accent-emerald/10 text-accent-emerald border border-accent-emerald/30 hover:bg-accent-emerald hover:text-background transition-colors"
-                      title="Concluir"
-                    >
-                      <Check className="w-5 h-5" />
-                    </button>
+                    <div className="flex items-center gap-3 self-end md:self-center">
+                      <div className="text-right">
+                        <div className="font-mono text-sm text-gray-300">{slot.startTime} – {slot.endTime}</div>
+                        <div className="text-[11px] text-gray-500">{slot.durationMinutes} min planejados</div>
+                      </div>
+
+                      {slot.task && !slot.isCompleted && (
+                        <div className="flex items-center gap-2">
+                          {!isRunning ? (
+                            <button 
+                              onClick={() => handleStartTask(slot.task!)}
+                              className="p-2.5 rounded-lg bg-surface border border-border hover:border-accent-amber hover:text-accent-amber text-gray-300 transition-colors"
+                              title="Iniciar no Modo Foco"
+                            >
+                              <Play className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <button 
+                              onClick={() => setActiveTimer(prev => prev ? { ...prev, isPaused: !prev.isPaused } : null)}
+                              className="p-2.5 rounded-lg bg-accent-amber/20 border border-accent-amber text-accent-amber"
+                              title={activeTimer?.isPaused ? "Retomar" : "Pausar"}
+                            >
+                              {activeTimer?.isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+                            </button>
+                          )}
+
+                          <button 
+                            onClick={() => handleCompleteTask(slot.task!)}
+                            className="p-2.5 rounded-lg bg-accent-emerald/10 text-accent-emerald border border-accent-emerald/30 hover:bg-accent-emerald hover:text-background transition-colors"
+                            title="Marcar como Concluída"
+                          >
+                            <Check className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             );
-          })
-        )}
+          })}
+        </div>
       </div>
 
-      {/* Modal de Edição de Tarefa */}
-      {editingTask && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-md animate-in fade-in zoom-in-95">
-            <h3 className="text-xl font-medium mb-6">Editar Tarefa</h3>
-            <form onSubmit={handleSaveEdit} className="space-y-4">
+      {/* 6. MODAL ANTI-OVERTHINKING (Alerta de Limite Máximo) */}
+      {showOverthinkingModal && overthinkingTask && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-surface border-2 border-accent-amber rounded-2xl p-6 w-full max-w-lg shadow-2xl animate-in zoom-in-95">
+            <div className="flex items-center gap-3 text-accent-amber mb-3">
+              <ShieldAlert className="w-7 h-7" />
+              <h3 className="text-xl font-bold">Atenção ao Overthinking / Limite de Tempo</h3>
+            </div>
+            <p className="text-sm text-gray-300 leading-relaxed mb-6">
+              Você atingiu o tempo máximo estipulado para <strong>"{overthinkingTask.title}"</strong>.
+              Continuar indefinidamente nesta tarefa sacrificará outras áreas do seu dia e comprometerá seu horário de encerramento às {profile.workEndTime || '19:00'}.
+            </p>
+
+            <div className="space-y-3">
+              <button 
+                onClick={() => {
+                  handleCompleteTask(overthinkingTask);
+                  setShowOverthinkingModal(false);
+                }}
+                className="w-full py-3 bg-accent-emerald hover:bg-emerald-400 text-background font-bold rounded-xl transition-colors flex items-center justify-center gap-2"
+              >
+                <Check className="w-4 h-4" /> Concluir e Entregar como Está
+              </button>
+
+              <button 
+                onClick={async () => {
+                  // Concluir bloco atual e criar continuação para amanhã
+                  const tomorrowStr = format(new Date(Date.now() + 86400000), 'yyyy-MM-dd');
+                  await addDoc(collection(db, 'tasks'), {
+                    title: `${overthinkingTask.title} (Continuação)`,
+                    type: overthinkingTask.type,
+                    area: overthinkingTask.area,
+                    priority: overthinkingTask.priority,
+                    timeEstimate: 30,
+                    status: 'pending',
+                    dateAllocated: tomorrowStr,
+                    userId: profile.uid,
+                    createdAt: new Date().toISOString()
+                  });
+                  await handleCompleteTask(overthinkingTask);
+                  setShowOverthinkingModal(false);
+                  alert('Restante da tarefa realocado para amanhã!');
+                }}
+                className="w-full py-3 bg-white/10 hover:bg-white/20 text-white font-medium rounded-xl transition-colors"
+              >
+                Pausar e Realocar Restante para Amanhã
+              </button>
+
+              <button 
+                onClick={() => {
+                  if (activeTimer) {
+                    setActiveTimer(prev => prev ? { ...prev, timeLeft: prev.timeLeft + 15 * 60 } : null);
+                  }
+                  setShowOverthinkingModal(false);
+                }}
+                className="w-full py-2.5 border border-border text-gray-400 hover:text-white rounded-xl text-xs transition-colors"
+              >
+                Estender apenas +15 min (Tolerância Final)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 7. Modal de Registro de Interrupção */}
+      {showInterruptionModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface border border-border rounded-2xl p-6 w-full max-w-md animate-in zoom-in-95">
+            <h3 className="text-xl font-bold mb-2">Reportar Interrupção</h3>
+            <p className="text-xs text-gray-400 mb-6">
+              Surgiu uma ligação urgente, colega chamou ou demanda rápida? Registre e o FlowLife recalculará o restante do dia.
+            </p>
+
+            <form onSubmit={handleSaveInterruption} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">Título</label>
-                <input
-                  type="text"
-                  value={editForm.title || ''}
-                  onChange={e => setEditForm({...editForm, title: e.target.value})}
+                <label className="block text-xs font-medium text-gray-400 mb-1.5">O que interrompeu você?</label>
+                <input 
+                  type="text" 
+                  value={interruptionDesc}
+                  onChange={e => setInterruptionDesc(e.target.value)}
                   required
-                  className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-amber"
+                  placeholder="Ex: Ligação de cliente, alinhamento rápido..."
+                  className="w-full bg-background border border-border rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-accent-amber"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-2">Área</label>
-                  <select
-                    value={editForm.area || ''}
-                    onChange={e => setEditForm({...editForm, area: e.target.value as LifeArea})}
-                    className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-amber"
-                  >
-                    {profile.activeAreas.map(a => <option key={a} value={a}>{a}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-2">Prioridade</label>
-                  <select
-                    value={editForm.priority || ''}
-                    onChange={e => setEditForm({...editForm, priority: e.target.value as Priority})}
-                    className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-amber"
-                  >
-                    {["Alta", "Média", "Baixa"].map(p => <option key={p} value={p}>{p}</option>)}
-                  </select>
-                </div>
-              </div>
+
               <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">Tempo Estimado (min)</label>
-                <input
-                  type="number"
-                  min="5" step="5"
-                  value={editForm.timeEstimate || 0}
-                  onChange={e => setEditForm({...editForm, timeEstimate: Number(e.target.value)})}
+                <label className="block text-xs font-medium text-gray-400 mb-1.5">Duração estimada (minutos)</label>
+                <input 
+                  type="number" 
+                  min="5" 
+                  step="5"
+                  value={interruptionDuration}
+                  onChange={e => setInterruptionDuration(Number(e.target.value))}
                   required
-                  className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-amber"
+                  className="w-full bg-background border border-border rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-accent-amber"
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">Notas</label>
-                <textarea
-                  value={editForm.notes || ''}
-                  onChange={e => setEditForm({...editForm, notes: e.target.value})}
-                  className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-amber min-h-[80px]"
-                />
-              </div>
-              <div className="flex gap-3 pt-4">
-                <button
+
+              <div className="flex gap-3 pt-3">
+                <button 
                   type="button"
-                  onClick={() => setEditingTask(null)}
-                  className="flex-1 py-3 rounded-lg border border-border hover:bg-white/5 transition-colors"
+                  onClick={() => setShowInterruptionModal(false)}
+                  className="flex-1 py-2.5 rounded-lg border border-border text-gray-400 hover:text-white text-sm"
                 >
                   Cancelar
                 </button>
-                <button
+                <button 
                   type="submit"
-                  className="flex-1 py-3 rounded-lg bg-accent-amber text-background font-medium hover:bg-amber-400 transition-colors"
+                  className="flex-1 py-2.5 bg-yellow-500 hover:bg-yellow-600 text-background font-bold rounded-lg text-sm transition-colors"
                 >
-                  Salvar
+                  Registrar e Recalcular
                 </button>
               </div>
             </form>
@@ -496,52 +768,54 @@ export function TodayView({ profile, tasks, unforeseenEvents }: TodayViewProps) 
         </div>
       )}
 
-      {/* Modal de Imprevisto */}
+      {/* 8. Modal de Imprevisto Maior */}
       {showImprevistoModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-md animate-in fade-in zoom-in-95">
-            <h3 className="text-xl font-medium mb-2">Registrar Imprevisto</h3>
-            <p className="text-sm text-gray-400 mb-6">
-              Aconteceu algo fora do planejado? Registre o tempo perdido e nós reorganizaremos o resto do seu mês.
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface border border-border rounded-2xl p-6 w-full max-w-md animate-in zoom-in-95">
+            <h3 className="text-xl font-bold mb-2">Registrar Imprevisto</h3>
+            <p className="text-xs text-gray-400 mb-6">
+              Aconteceu algo fora do planejado? O sistema deduz essa capacidade e realoca o que não couber até as {profile.workEndTime || '19:00'}.
             </p>
-            
-            <form onSubmit={handleAddImprevisto} className="space-y-4">
+
+            <form onSubmit={handleSaveImprevisto} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">O que aconteceu?</label>
+                <label className="block text-xs font-medium text-gray-400 mb-1.5">O que aconteceu?</label>
                 <input 
                   type="text" 
                   value={imprevistoDesc}
                   onChange={e => setImprevistoDesc(e.target.value)}
                   required
-                  className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-red-500"
-                  placeholder="Ex: Reunião de emergência, pneu furou..."
+                  placeholder="Ex: Pneu furou, reunião de emergência..."
+                  className="w-full bg-background border border-border rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500"
                 />
               </div>
+
               <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">Quanto tempo custou? (minutos)</label>
+                <label className="block text-xs font-medium text-gray-400 mb-1.5">Tempo perdido (minutos)</label>
                 <input 
                   type="number" 
-                  min="15" step="15"
+                  min="15" 
+                  step="15"
                   value={imprevistoDuration}
                   onChange={e => setImprevistoDuration(Number(e.target.value))}
                   required
-                  className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-red-500"
+                  className="w-full bg-background border border-border rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500"
                 />
               </div>
-              <div className="flex gap-3 pt-4">
+
+              <div className="flex gap-3 pt-3">
                 <button 
                   type="button"
                   onClick={() => setShowImprevistoModal(false)}
-                  className="flex-1 py-3 rounded-lg border border-border hover:bg-white/5 transition-colors"
+                  className="flex-1 py-2.5 rounded-lg border border-border text-gray-400 hover:text-white text-sm"
                 >
                   Cancelar
                 </button>
                 <button 
                   type="submit"
-                  disabled={!imprevistoDesc}
-                  className="flex-1 py-3 rounded-lg bg-red-500 text-white font-medium hover:bg-red-600 transition-colors disabled:opacity-50"
+                  className="flex-1 py-2.5 bg-red-500 hover:bg-red-600 text-white font-bold rounded-lg text-sm transition-colors"
                 >
-                  Registrar
+                  Registrar e Otimizar
                 </button>
               </div>
             </form>

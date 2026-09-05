@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Task, TaskType, LifeArea, Priority, UserProfile } from '../types';
+import { Task, TaskType, LifeArea, Priority, UserProfile, Project } from '../types';
 import { db } from '../firebase';
 import { collection, addDoc, writeBatch, doc } from 'firebase/firestore';
-import { Plus, Sparkles, Send, Loader2 } from 'lucide-react';
+import { Plus, Sparkles, Send, Loader2, Zap, Clock, ShieldAlert, FolderKanban } from 'lucide-react';
 import { GoogleGenAI } from '@google/genai';
 import { cn } from '../lib/utils';
 
@@ -11,26 +11,35 @@ const PRIORITIES: Priority[] = ["Alta", "Média", "Baixa"];
 
 interface InboxViewProps {
   profile: UserProfile;
+  projects?: Project[];
 }
 
-export function InboxView({ profile }: InboxViewProps) {
-  const [mode, setMode] = useState<'manual' | 'ai'>('ai');
+export function InboxView({ profile, projects = [] }: InboxViewProps) {
+  const [mode, setMode] = useState<'ai' | 'quick' | 'manual'>('quick');
   
+  // Quick Capture State
+  const [quickText, setQuickText] = useState('');
+  const [quickLoading, setQuickLoading] = useState(false);
+
   // Manual Form State
   const [title, setTitle] = useState('');
   const [type, setType] = useState<TaskType>('Tarefa');
-  const [area, setArea] = useState<LifeArea>(profile.activeAreas[0] || 'Outro');
+  const [area, setArea] = useState<LifeArea>(profile.activeAreas[0] || 'Trabalho');
+  const [projectId, setProjectId] = useState<string>('');
   const [priority, setPriority] = useState<Priority>('Média');
+  const [urgency, setUrgency] = useState(3);
+  const [impact, setImpact] = useState(3);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
-  const [timeEstimate, setTimeEstimate] = useState(60);
+  const [timeEstimate, setTimeEstimate] = useState(45);
+  const [timeMax, setTimeMax] = useState(75);
   const [notes, setNotes] = useState('');
   const [isFixed, setIsFixed] = useState(false);
   const [loading, setLoading] = useState(false);
 
   // AI Chat State
   const [messages, setMessages] = useState<{role: 'user' | 'ai', text: string}[]>([
-    { role: 'ai', text: 'Olá! Me conte qual é o seu objetivo, projeto ou tarefa. Se for algo grande (como ler um livro ou fazer um curso), eu farei algumas perguntas para fracionar isso perfeitamente no seu calendário.' }
+    { role: 'ai', text: 'Olá, Pedro! Me conte qual é o seu objetivo, tarefa ou oferta. Se for um projeto grande (ex: criar 10 criativos, gravar curso, planejar lançamento), eu vou fracioná-lo em blocos ideais que respeitem seu horário de encerramento.' }
   ]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -41,22 +50,66 @@ export function InboxView({ profile }: InboxViewProps) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, proposedTasks]);
 
+  // Captura Rápida Inteligente
+  const handleQuickCapture = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickText.trim()) return;
+
+    setQuickLoading(true);
+    try {
+      // Extrair se há horário ou duração simples no texto
+      let estimated = 30;
+      const lower = quickText.toLowerCase();
+      if (lower.includes('15 min') || lower.includes('15m')) estimated = 15;
+      else if (lower.includes('1h') || lower.includes('60 min')) estimated = 60;
+      else if (lower.includes('2h') || lower.includes('120 min')) estimated = 120;
+      else if (lower.includes('45 min') || lower.includes('45m')) estimated = 45;
+
+      const isCommitment = lower.includes('reunião') || lower.includes('igreja') || lower.includes('treinar') || lower.includes('às ') || lower.includes('as ');
+
+      await addDoc(collection(db, 'tasks'), {
+        title: quickText.trim(),
+        type: isCommitment ? 'Compromisso' : 'Tarefa',
+        area: profile.activeAreas[0] || 'Trabalho',
+        priority: 'Média',
+        urgency: 3,
+        impact: 3,
+        timeEstimate: estimated,
+        timeMax: Math.round(estimated * 1.5),
+        status: 'pending',
+        isFixed: isCommitment,
+        userId: profile.uid,
+        createdAt: new Date().toISOString()
+      });
+
+      setQuickText('');
+    } catch (e) {
+      console.error("Erro na captura rápida", e);
+    } finally {
+      setQuickLoading(false);
+    }
+  };
+
   const handleManualSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title || !endDate) return;
+    if (!title) return;
 
     setLoading(true);
     try {
       const newTask: Omit<Task, 'id'> = {
-        title,
+        title: title.trim(),
         type,
         area,
+        projectId: projectId || undefined,
         priority,
-        deadline: new Date(endDate).toISOString(),
-        endDate: new Date(endDate).toISOString(),
+        urgency: Number(urgency),
+        impact: Number(impact),
+        deadline: endDate ? new Date(endDate).toISOString() : undefined,
+        endDate: endDate ? new Date(endDate).toISOString() : undefined,
         startDate: startDate ? new Date(startDate).toISOString() : undefined,
-        timeEstimate,
-        notes,
+        timeEstimate: Number(timeEstimate),
+        timeMax: Number(timeMax) || Math.round(Number(timeEstimate) * 1.5),
+        notes: notes.trim(),
         status: 'pending',
         isFixed,
         userId: profile.uid,
@@ -69,8 +122,10 @@ export function InboxView({ profile }: InboxViewProps) {
       setNotes('');
       setStartDate('');
       setEndDate('');
-      setTimeEstimate(60);
+      setTimeEstimate(45);
+      setTimeMax(75);
       setIsFixed(false);
+      alert('Tarefa adicionada com sucesso!');
     } catch (error) {
       console.error("Error adding task", error);
     } finally {
@@ -90,9 +145,8 @@ export function InboxView({ profile }: InboxViewProps) {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       
       const systemPrompt = `Você é o assistente de IA do FlowLife.
-O usuário quer adicionar uma tarefa, projeto ou objetivo.
-Se o objetivo for complexo (ex: ler um livro, fazer um curso, projeto grande), faça perguntas curtas para entender a dimensão (ex: páginas, horas totais, prazo).
-Seu objetivo final é fracionar o objetivo em tarefas diárias ou menores.
+O usuário é o Pedro (trabalha com marketing digital, ofertas validadas, tráfego orgânico, projetos paralelos, treinos de musculação, Jiu-Jitsu e igreja).
+O objetivo é receber metas/demandas e fracioná-las em blocos executáveis de 30 a 90 minutos com limite de tempo contra overthinking.
 
 RESPONDA SEMPRE EM JSON no seguinte formato:
 Se precisar perguntar algo:
@@ -101,28 +155,26 @@ Se precisar perguntar algo:
   "message": "Sua pergunta aqui..."
 }
 
-Se tiver informações suficientes para criar as tarefas (fracionadas ou única):
+Se tiver informações suficientes para criar as tarefas:
 {
   "action": "create_tasks",
-  "message": "Aqui está o plano que montei...",
+  "message": "Aqui está o plano estratégico fracionado...",
   "tasks": [
     {
       "title": "Nome da subtarefa",
       "type": "Tarefa",
-      "area": "Estudos",
+      "area": "Trabalho",
       "priority": "Alta",
-      "timeEstimate": 30,
-      "startDate": "2026-04-12T00:00:00Z",
-      "endDate": "2026-04-12T23:59:59Z"
+      "urgency": 4,
+      "impact": 5,
+      "timeEstimate": 45,
+      "timeMax": 75
     }
   ]
 }
 
 Áreas válidas: ${profile.activeAreas.join(', ')}.
-Tipos válidos: Projeto, Tarefa, Compromisso, Entrega, Reunião, Meta, Hábito, Outro.
-Prioridades: Alta, Média, Baixa.
-Data atual para referência: ${new Date().toISOString()}.
-Seja direto, amigável e focado em produtividade.`;
+Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
 
       const chatHistory = messages.map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.text}`).join('\n');
       const prompt = `${systemPrompt}\n\nHistórico:\n${chatHistory}\nUser: ${userMsg}\nAI:`;
@@ -156,7 +208,6 @@ Seja direto, amigável e focado em produtividade.`;
     if (!proposedTasks) return;
     setLoading(true);
     try {
-      // Use batch to add multiple tasks
       const batch = writeBatch(db);
       
       proposedTasks.forEach(pt => {
@@ -164,12 +215,12 @@ Seja direto, amigável e focado em produtividade.`;
         const newTask: Omit<Task, 'id'> = {
           title: pt.title || 'Tarefa sem nome',
           type: pt.type as TaskType || 'Tarefa',
-          area: pt.area as LifeArea || profile.activeAreas[0] || 'Outro',
+          area: pt.area as LifeArea || profile.activeAreas[0] || 'Trabalho',
           priority: pt.priority as Priority || 'Média',
-          deadline: pt.endDate || new Date().toISOString(),
-          startDate: pt.startDate,
-          endDate: pt.endDate,
-          timeEstimate: pt.timeEstimate || 30,
+          urgency: pt.urgency || 3,
+          impact: pt.impact || 3,
+          timeEstimate: pt.timeEstimate || 45,
+          timeMax: pt.timeMax || Math.round((pt.timeEstimate || 45) * 1.5),
           status: 'pending',
           userId: profile.uid,
           createdAt: new Date().toISOString()
@@ -178,9 +229,8 @@ Seja direto, amigável e focado em produtividade.`;
       });
 
       await batch.commit();
-      
       setProposedTasks(null);
-      setMessages(prev => [...prev, { role: 'ai', text: "✅ Plano adicionado com sucesso ao seu FlowLife! O algoritmo já está distribuindo as tarefas nos seus dias." }]);
+      setMessages(prev => [...prev, { role: 'ai', text: "✅ Tarefas salvas no Backlog! O algoritmo do FlowLife já está priorizando e encaixando-as na sua agenda." }]);
     } catch (error) {
       console.error("Error saving AI tasks", error);
     } finally {
@@ -189,224 +239,300 @@ Seja direto, amigável e focado em produtividade.`;
   };
 
   return (
-    <div className="max-w-3xl mx-auto">
-      <div className="mb-8">
-        <h2 className="font-serif text-3xl mb-2">Inbox</h2>
-        <p className="text-gray-400">Capture tudo o que precisa ser feito.</p>
+    <div className="max-w-3xl mx-auto space-y-6 pb-12">
+      {/* Header */}
+      <div>
+        <h2 className="font-serif text-3xl mb-1 text-white">Backlog & Captura Rápida</h2>
+        <p className="text-sm text-gray-400">Capture ideias, compromissos ou deixe a IA fracionar projetos complexos.</p>
       </div>
 
-      <div className="flex gap-2 mb-6 p-1 bg-surface border border-border rounded-lg w-fit">
+      {/* Seletor de Modo */}
+      <div className="flex gap-2 p-1 bg-surface border border-border rounded-xl w-fit">
+        <button 
+          onClick={() => setMode('quick')}
+          className={cn(
+            "px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5",
+            mode === 'quick' ? "bg-accent-amber text-background" : "text-gray-400 hover:text-white"
+          )}
+        >
+          <Zap className="w-3.5 h-3.5" />
+          Captura Rápida
+        </button>
         <button 
           onClick={() => setMode('ai')}
-          className={cn("px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-2", mode === 'ai' ? "bg-accent-amber/20 text-accent-amber" : "text-gray-400 hover:text-white")}
+          className={cn(
+            "px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5",
+            mode === 'ai' ? "bg-accent-amber text-background" : "text-gray-400 hover:text-white"
+          )}
         >
-          <Sparkles className="w-4 h-4" /> Assistente IA
+          <Sparkles className="w-3.5 h-3.5" />
+          Assistente IA
         </button>
         <button 
           onClick={() => setMode('manual')}
-          className={cn("px-4 py-2 rounded-md text-sm font-medium transition-colors", mode === 'manual' ? "bg-white/10 text-white" : "text-gray-400 hover:text-white")}
+          className={cn(
+            "px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5",
+            mode === 'manual' ? "bg-accent-amber text-background" : "text-gray-400 hover:text-white"
+          )}
         >
-          Criar Manualmente
+          <Plus className="w-3.5 h-3.5" />
+          Cadastro Completo
         </button>
       </div>
 
-      {mode === 'ai' ? (
-        <div className="bg-surface border border-border rounded-xl flex flex-col h-[600px] overflow-hidden">
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
-            {messages.map((msg, i) => (
-              <div key={i} className={cn("flex", msg.role === 'user' ? "justify-end" : "justify-start")}>
-                <div className={cn("max-w-[80%] rounded-2xl p-4", msg.role === 'user' ? "bg-accent-emerald text-background rounded-tr-sm" : "bg-background border border-border rounded-tl-sm")}>
-                  {msg.text}
-                </div>
+      {/* 1. MODO CAPTURA RÁPIDA */}
+      {mode === 'quick' && (
+        <div className="bg-surface border border-border rounded-2xl p-6">
+          <h3 className="text-base font-bold text-white mb-2">Entrada Sem Atrito</h3>
+          <p className="text-xs text-gray-400 mb-4">
+            Digite o que precisa ser feito. O FlowLife detecta se é uma tarefa, compromisso ou duração estimada.
+          </p>
+
+          <form onSubmit={handleQuickCapture} className="space-y-3">
+            <input 
+              type="text"
+              value={quickText}
+              onChange={e => setQuickText(e.target.value)}
+              placeholder="Ex: Editar 3 criativos da Oferta A 45 min..."
+              className="w-full bg-background border border-border rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-accent-amber"
+              autoFocus
+            />
+
+            <div className="flex justify-between items-center text-xs text-gray-500">
+              <span>Dica: inclua '15m', '45 min' ou 'reunião' para autodetecção</span>
+              <button 
+                type="submit"
+                disabled={quickLoading || !quickText.trim()}
+                className="px-5 py-2.5 bg-accent-amber text-background font-bold rounded-xl hover:bg-amber-400 transition-colors disabled:opacity-50 flex items-center gap-2"
+              >
+                {quickLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                Capturar no Backlog
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* 2. MODO IA (GEMINI) */}
+      {mode === 'ai' && (
+        <div className="bg-surface border border-border rounded-2xl p-6 flex flex-col h-[520px]">
+          <div className="flex-1 overflow-y-auto space-y-4 pr-2">
+            {messages.map((m, i) => (
+              <div 
+                key={i} 
+                className={cn(
+                  "p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed",
+                  m.role === 'user' 
+                    ? "bg-accent-amber text-background ml-auto font-medium" 
+                    : "bg-background border border-border text-gray-200"
+                )}
+              >
+                {m.text}
               </div>
             ))}
-            
+
             {isTyping && (
-              <div className="flex justify-start">
-                <div className="bg-background border border-border rounded-2xl rounded-tl-sm p-4 flex items-center gap-2 text-gray-400">
-                  <Loader2 className="w-4 h-4 animate-spin" /> Pensando...
-                </div>
+              <div className="flex items-center gap-2 text-xs text-gray-400">
+                <Loader2 className="w-4 h-4 animate-spin" /> FlowLife pensando no fracionamento...
               </div>
             )}
 
+            {/* Proposta de Tarefas da IA */}
             {proposedTasks && (
-              <div className="bg-background border border-accent-amber/50 rounded-xl p-4 mt-4">
-                <h4 className="font-medium text-accent-amber mb-4 flex items-center gap-2">
-                  <Sparkles className="w-4 h-4" /> Plano Sugerido
+              <div className="bg-background border-2 border-accent-amber/40 rounded-xl p-4 space-y-3">
+                <h4 className="text-xs font-bold text-accent-amber uppercase tracking-wider">
+                  Plano Estratégico Sugerido
                 </h4>
-                <div className="space-y-2 mb-4 max-h-60 overflow-y-auto pr-2">
-                  {proposedTasks.map((pt, i) => (
-                    <div key={i} className="flex justify-between items-center p-3 bg-surface rounded-lg border border-border text-sm">
-                      <div>
-                        <div className="font-medium">{pt.title}</div>
-                        <div className="text-gray-400 text-xs mt-1">{pt.area} • {pt.timeEstimate} min</div>
-                      </div>
-                      <div className="text-right text-xs text-gray-500">
-                        {pt.startDate && <div>Início: {new Date(pt.startDate).toLocaleDateString()}</div>}
-                        {pt.endDate && <div>Fim: {new Date(pt.endDate).toLocaleDateString()}</div>}
-                      </div>
+                <div className="space-y-2">
+                  {proposedTasks.map((pt, idx) => (
+                    <div key={idx} className="flex justify-between items-center text-xs bg-white/5 px-3 py-2 rounded-lg">
+                      <span className="font-medium text-white">{pt.title}</span>
+                      <span className="font-mono text-accent-amber font-bold">{pt.timeEstimate} min</span>
                     </div>
                   ))}
                 </div>
-                <div className="flex gap-3">
-                  <button 
-                    onClick={() => setProposedTasks(null)}
-                    className="flex-1 py-2 rounded-lg border border-border hover:bg-white/5 transition-colors text-sm"
-                  >
-                    Cancelar
-                  </button>
-                  <button 
-                    onClick={confirmAITasks}
-                    disabled={loading}
-                    className="flex-1 py-2 rounded-lg bg-accent-amber text-background font-medium hover:bg-amber-400 transition-colors text-sm flex items-center justify-center gap-2"
-                  >
-                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Confirmar e Criar'}
-                  </button>
-                </div>
+                <button 
+                  onClick={confirmAITasks}
+                  disabled={loading}
+                  className="w-full py-2.5 bg-accent-emerald text-background font-bold rounded-lg text-xs hover:bg-emerald-400 transition-colors flex items-center justify-center gap-1.5"
+                >
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                  Confirmar e Salvar no Backlog
+                </button>
               </div>
             )}
+
             <div ref={messagesEndRef} />
           </div>
-          
-          <div className="p-4 border-t border-border bg-background">
-            <div className="flex gap-2">
-              <input 
-                type="text" 
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleSendAI()}
-                placeholder="Ex: Quero ler o livro Hábitos Atômicos este mês..."
-                className="flex-1 bg-surface border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-amber"
-                disabled={isTyping || proposedTasks !== null}
-              />
-              <button 
-                onClick={handleSendAI}
-                disabled={!input.trim() || isTyping || proposedTasks !== null}
-                className="p-3 bg-accent-amber text-background rounded-lg hover:bg-amber-400 transition-colors disabled:opacity-50"
-              >
-                <Send className="w-5 h-5" />
-              </button>
-            </div>
+
+          <div className="pt-4 border-t border-border mt-auto flex gap-2">
+            <input 
+              type="text"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleSendAI()}
+              placeholder="Ex: Preciso validar uma nova oferta neste nicho..."
+              className="flex-1 bg-background border border-border rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-accent-amber"
+            />
+            <button 
+              onClick={handleSendAI}
+              disabled={isTyping || !input.trim()}
+              className="px-4 py-2.5 bg-accent-amber text-background font-bold rounded-xl hover:bg-amber-400 transition-colors disabled:opacity-50"
+            >
+              <Send className="w-4 h-4" />
+            </button>
           </div>
         </div>
-      ) : (
-        <form onSubmit={handleManualSubmit} className="bg-surface border border-border rounded-xl p-6 space-y-6">
+      )}
+
+      {/* 3. MODO CADASTRO COMPLETO (COM LIMITES E PRIORIDADE REAL) */}
+      {mode === 'manual' && (
+        <form onSubmit={handleManualSubmit} className="bg-surface border border-border rounded-2xl p-6 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-400 mb-2">O que precisa ser feito?</label>
+            <label className="block text-xs font-medium text-gray-400 mb-1">Título da Tarefa</label>
             <input 
               type="text" 
               value={title}
               onChange={e => setTitle(e.target.value)}
               required
-              className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-emerald text-lg"
-              placeholder="Ex: Consulta médica, Projeto X..."
+              placeholder="Ex: Roteirizar 5 criativos para Oferta A"
+              className="w-full bg-background border border-border rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-accent-amber"
             />
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div>
-              <label className="block text-sm font-medium text-gray-400 mb-2">Tipo</label>
+              <label className="block text-xs font-medium text-gray-400 mb-1">Área</label>
               <select 
-                value={type} 
-                onChange={e => setType(e.target.value as TaskType)}
-                className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-emerald"
-              >
-                {TASK_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-2">Área da Vida</label>
-              <select 
-                value={area} 
+                value={area}
                 onChange={e => setArea(e.target.value as LifeArea)}
-                className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-emerald"
+                className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-accent-amber"
               >
-                {profile.activeAreas.map(a => <option key={a} value={a}>{a}</option>)}
+                {profile.activeAreas.map(a => (
+                  <option key={a} value={a}>{a}</option>
+                ))}
               </select>
             </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-2">Quando começar? (Opcional)</label>
-              <input 
-                type="datetime-local" 
-                value={startDate}
-                onChange={e => setStartDate(e.target.value)}
-                className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-emerald"
-              />
-            </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-400 mb-2">Quando encerrar? (Prazo)</label>
-              <input 
-                type="datetime-local" 
-                value={endDate}
-                onChange={e => setEndDate(e.target.value)}
-                required
-                className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-emerald"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-2">Prioridade</label>
+              <label className="block text-xs font-medium text-gray-400 mb-1">Projeto / Oferta</label>
               <select 
-                value={priority} 
-                onChange={e => setPriority(e.target.value as Priority)}
-                className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-emerald"
+                value={projectId}
+                onChange={e => setProjectId(e.target.value)}
+                className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-accent-amber"
               >
-                {PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
+                <option value="">Nenhum projeto específico</option>
+                {projects.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
               </select>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-400 mb-2">Tempo Estimado (min)</label>
+              <label className="block text-xs font-medium text-gray-400 mb-1">Tipo</label>
+              <select 
+                value={type}
+                onChange={e => setType(e.target.value as TaskType)}
+                className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-accent-amber"
+              >
+                {TASK_TYPES.map(t => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Calibrador de Prioridade Real */}
+          <div className="bg-background/60 border border-border/80 rounded-xl p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-gray-400">Impacto Estratégico (Receita / Avanço)</span>
+                <span className="font-bold text-accent-amber">{impact}/5</span>
+              </div>
+              <input 
+                type="range" 
+                min="1" max="5" 
+                value={impact}
+                onChange={e => setImpact(Number(e.target.value))}
+                className="w-full accent-accent-amber"
+              />
+            </div>
+
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-gray-400">Urgência</span>
+                <span className="font-bold text-accent-amber">{urgency}/5</span>
+              </div>
+              <input 
+                type="range" 
+                min="1" max="5" 
+                value={urgency}
+                onChange={e => setUrgency(Number(e.target.value))}
+                className="w-full accent-accent-amber"
+              />
+            </div>
+          </div>
+
+          {/* Limite de Tempo & Anti-Overthinking */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">Tempo Estimado (minutos)</label>
               <input 
                 type="number" 
                 min="5" step="5"
                 value={timeEstimate}
-                onChange={e => setTimeEstimate(Number(e.target.value))}
+                onChange={e => {
+                  const est = Number(e.target.value);
+                  setTimeEstimate(est);
+                  setTimeMax(Math.round(est * 1.5));
+                }}
                 required
-                className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-emerald"
+                className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-accent-amber"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-red-400 mb-1 flex items-center gap-1">
+                <ShieldAlert className="w-3.5 h-3.5" />
+                Limite Máximo Anti-Overthinking (min)
+              </label>
+              <input 
+                type="number" 
+                min="10" step="5"
+                value={timeMax}
+                onChange={e => setTimeMax(Number(e.target.value))}
+                required
+                className="w-full bg-background border border-red-500/30 rounded-xl px-3 py-2.5 text-sm text-red-300 focus:outline-none focus:border-red-500"
               />
             </div>
           </div>
 
           <div>
-            <label className="flex items-center gap-3 p-4 border border-border rounded-lg bg-background cursor-pointer hover:border-gray-500 transition-colors">
-              <input 
-                type="checkbox" 
-                checked={isFixed}
-                onChange={e => setIsFixed(e.target.checked)}
-                className="w-5 h-5 accent-accent-emerald"
-              />
-              <div>
-                <div className="font-medium">Compromisso Fixo?</div>
-                <div className="text-sm text-gray-400">Marque se isso tem hora exata para acontecer (ex: Reunião)</div>
-              </div>
-            </label>
+            <label className="block text-xs font-medium text-gray-400 mb-1">Prazo Final (Opcional)</label>
+            <input 
+              type="datetime-local" 
+              value={endDate}
+              onChange={e => setEndDate(e.target.value)}
+              className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-accent-amber"
+            />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-400 mb-2">Notas (Opcional)</label>
+            <label className="block text-xs font-medium text-gray-400 mb-1">Notas ou Checklist</label>
             <textarea 
               value={notes}
               onChange={e => setNotes(e.target.value)}
-              className="w-full bg-background border border-border rounded-lg px-4 py-3 focus:outline-none focus:border-accent-emerald min-h-[100px]"
-              placeholder="Detalhes adicionais..."
+              placeholder="Instruções ou links úteis..."
+              className="w-full bg-background border border-border rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-accent-amber min-h-[60px]"
             />
           </div>
 
           <button 
             type="submit"
-            disabled={loading || !title || !endDate}
-            className="w-full bg-accent-emerald text-background font-medium rounded-lg px-4 py-4 hover:bg-emerald-400 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+            disabled={loading}
+            className="w-full py-3 bg-accent-amber text-background font-bold text-sm rounded-xl hover:bg-amber-400 transition-colors disabled:opacity-50"
           >
-            <Plus className="w-5 h-5" />
-            {loading ? 'Adicionando...' : 'Adicionar ao FlowLife'}
+            {loading ? 'Salvando...' : 'Cadastrar Tarefa Estratégica'}
           </button>
         </form>
       )}

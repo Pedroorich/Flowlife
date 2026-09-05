@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Task, UserProfile, UnforeseenEvent, LifeArea, Priority } from '../types';
-import { distributeTasks } from '../lib/scheduler';
+import { distributeTasks } from '../lib/smartScheduler';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isToday, parseISO } from 'date-fns';
 import { cn } from '../lib/utils';
 import { X, Edit2, Check, Clock } from 'lucide-react';

@@ -3,8 +3,17 @@ import { LifeArea } from '../types';
 import { cn } from '../lib/utils';
 
 const ALL_AREAS: LifeArea[] = [
-  "Trabalho", "Estudos", "Saúde & Bem-estar", "Finanças", 
-  "Casa & Família", "Projetos Pessoais", "Social & Relacionamentos", "Outro"
+  "Trabalho", 
+  "Conteúdo & Tráfego", 
+  "Projetos & Ofertas", 
+  "Saúde & Treino", 
+  "Igreja & Espiritual", 
+  "Descanso & Pessoal", 
+  "Finanças", 
+  "Estudos", 
+  "Casa & Família", 
+  "Social & Relacionamentos", 
+  "Outro"
 ];
 
 interface OnboardingProps {
