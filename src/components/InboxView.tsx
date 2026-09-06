@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Task, TaskType, LifeArea, Priority, UserProfile, Project, RoutineBlock } from '../types';
-import { db } from '../firebase';
-import { collection, addDoc, writeBatch, doc, deleteDoc, updateDoc, query, where, getDocs } from 'firebase/firestore';
+import { db, auth } from '../firebase';
+import { collection, addDoc, writeBatch, doc, deleteDoc, updateDoc, setDoc, query, where, getDocs } from 'firebase/firestore';
 import { 
   Plus, 
   Sparkles, 
@@ -97,6 +97,7 @@ interface InboxViewProps {
 }
 
 export function InboxView({ profile, projects = [], tasks = [], routines = [], onNavigateTab }: InboxViewProps) {
+  const currentUid = auth.currentUser?.uid || profile.uid;
   const [mode, setMode] = useState<'ai' | 'quick' | 'manual'>('quick');
   
   // Quick Capture State
@@ -173,7 +174,7 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
         setKeyMessage({ type: 'error', text: `Chave inválida ou erro na API: ${testResult.error}` });
         return;
       }
-      await saveGeminiApiKey(clean, profile.uid);
+      await saveGeminiApiKey(clean, currentUid);
       setApiKey(clean);
       setShowKeyConfig(false);
       setVoiceError(null);
@@ -296,7 +297,7 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
         timeMax: Math.round(estimated * 1.5),
         status: 'pending',
         isFixed: isCommitment,
-        userId: profile.uid,
+        userId: currentUid,
         createdAt: new Date().toISOString()
       });
 
@@ -331,7 +332,7 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
         assignedAgentId: assignedAgentId || undefined,
         status: 'pending',
         isFixed,
-        userId: profile.uid,
+        userId: currentUid,
         createdAt: new Date().toISOString()
       };
 
@@ -389,7 +390,7 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
 
           if (!projectMap.has(lowerName)) {
             const docRef = await addDoc(collection(db, 'projects'), {
-              userId: profile.uid,
+              userId: currentUid,
               name: cleanName,
               description: proj.description || '',
               area: proj.area || 'Trabalho',
@@ -417,7 +418,7 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
 
           if (!alreadyExists) {
             await addDoc(collection(db, 'routines'), {
-              userId: profile.uid,
+              userId: currentUid,
               title: cleanTitle,
               area: r.area || 'Saúde & Treino',
               startTime: r.startTime,
@@ -436,7 +437,7 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
       let deletedRoutinesCount = 0;
       // 2.1 Excluir Rotinas se solicitado pela IA
       if (plan?.clearAllRoutines) {
-        const q = query(collection(db, 'routines'), where('userId', '==', profile.uid));
+        const q = query(collection(db, 'routines'), where('userId', '==', currentUid));
         const snap = await getDocs(q);
         if (!snap.empty) {
           const batch = writeBatch(db);
@@ -444,9 +445,9 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
           await batch.commit();
           deletedRoutinesCount += snap.size;
         }
-        await updateDoc(doc(db, 'users', profile.uid), {
+        await setDoc(doc(db, 'users', currentUid), {
           routinesCleared: true
-        });
+        }, { merge: true });
       } else if (plan?.deleteRoutineTitles && plan.deleteRoutineTitles.length > 0) {
         for (const titleToDelete of plan.deleteRoutineTitles) {
           const matching = routines.filter(r => 
@@ -460,17 +461,17 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
           }
         }
         if (routines.length <= deletedRoutinesCount) {
-          await updateDoc(doc(db, 'users', profile.uid), {
+          await setDoc(doc(db, 'users', currentUid), {
             routinesCleared: true
-          });
+          }, { merge: true });
         }
       }
 
       // Se rotinas foram adicionadas e o perfil estava marcado como limpo, remove a flag
       if (createdRoutinesCount > 0 && profile.routinesCleared) {
-        await updateDoc(doc(db, 'users', profile.uid), {
+        await setDoc(doc(db, 'users', currentUid), {
           routinesCleared: false
-        });
+        }, { merge: true });
       }
 
       // 3. Criar Tarefas Fracionadas
@@ -505,7 +506,7 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
             dateAllocated: pt.scheduledStartTime ? todayKey : undefined,
             notes: (pt as any).notes || '',
             status: 'pending',
-            userId: profile.uid,
+            userId: currentUid,
             createdAt: new Date().toISOString()
           };
           batch.set(docRef, newTask);
@@ -526,7 +527,7 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
         if (plan.profileUpdates.bedTime) updates.bedTime = plan.profileUpdates.bedTime;
 
         if (Object.keys(updates).length > 0) {
-          await updateDoc(doc(db, 'users', profile.uid), updates);
+          await setDoc(doc(db, 'users', currentUid), updates, { merge: true });
           profileUpdated = true;
         }
       }
@@ -1467,7 +1468,7 @@ REGRAS OBRIGATÓRIAS:
               onClick={async () => {
                 if (!confirm('Deseja excluir TODAS as tarefas pendentes do Backlog?')) return;
                 try {
-                  const q = query(collection(db, 'tasks'), where('userId', '==', profile.uid), where('status', '==', 'pending'));
+                  const q = query(collection(db, 'tasks'), where('userId', '==', currentUid), where('status', '==', 'pending'));
                   const snap = await getDocs(q);
                   const batch = writeBatch(db);
                   snap.docs.forEach(d => batch.delete(d.ref));

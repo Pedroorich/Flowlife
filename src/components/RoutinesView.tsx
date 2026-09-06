@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { RoutineBlock, UserProfile, LifeArea } from '../types';
-import { db } from '../firebase';
+import { db, auth } from '../firebase';
 import { 
   collection, 
   addDoc, 
+  setDoc,
   updateDoc, 
   deleteDoc, 
   doc, 
@@ -45,6 +46,8 @@ const DAYS_OF_WEEK = [
 ];
 
 export function RoutinesView({ profile, routines }: RoutinesViewProps) {
+  const currentUid = auth.currentUser?.uid || profile.uid;
+
   // Configuração dos limites inegociáveis do perfil (Apple Design)
   const [workStartTime, setWorkStartTime] = useState(profile.workStartTime || '08:30');
   const [workEndTime, setWorkEndTime] = useState(profile.workEndTime || '19:00');
@@ -73,12 +76,12 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
     setProfileSaved(false);
 
     try {
-      await updateDoc(doc(db, 'users', profile.uid), {
+      await setDoc(doc(db, 'users', currentUid), {
         workStartTime,
         workEndTime,
         wakeTime,
         bedTime
-      });
+      }, { merge: true });
       setProfileSaved(true);
       setTimeout(() => setProfileSaved(false), 3000);
     } catch (e) {
@@ -94,7 +97,7 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
 
     try {
       await addDoc(collection(db, 'routines'), {
-        userId: profile.uid,
+        userId: currentUid,
         title: title.trim(),
         area,
         startTime,
@@ -108,9 +111,9 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
 
       // Se havia flag de rotina limpa, remove
       if (profile.routinesCleared) {
-        await updateDoc(doc(db, 'users', profile.uid), {
+        await setDoc(doc(db, 'users', currentUid), {
           routinesCleared: false
-        });
+        }, { merge: true });
       }
 
       setTitle('');
@@ -134,16 +137,16 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
 
         if (remaining.length === 0) {
           // Se não sobrou nenhuma rotina padrão, marca o perfil como limpo
-          await updateDoc(doc(db, 'users', profile.uid), {
+          await setDoc(doc(db, 'users', currentUid), {
             routinesCleared: true
-          });
+          }, { merge: true });
         } else {
           // Grava atomicamente as rotinas restantes no Firestore
           const batch = writeBatch(db);
           for (const r of remaining) {
             const newDocRef = doc(collection(db, 'routines'));
             batch.set(newDocRef, {
-              userId: profile.uid,
+              userId: currentUid,
               title: r.title,
               area: r.area,
               startTime: r.startTime,
@@ -157,9 +160,9 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
           }
           await batch.commit();
 
-          await updateDoc(doc(db, 'users', profile.uid), {
+          await setDoc(doc(db, 'users', currentUid), {
             routinesCleared: false
-          });
+          }, { merge: true });
         }
       } else {
         // Rotina real gravada no Firestore
@@ -168,9 +171,9 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
         // Se esta era a única ou última rotina existente no Firestore, marca routinesCleared: true
         // para que as rotinas padrão não reapareçam do nada!
         if (routines.length <= 1) {
-          await updateDoc(doc(db, 'users', profile.uid), {
+          await setDoc(doc(db, 'users', currentUid), {
             routinesCleared: true
-          });
+          }, { merge: true });
         }
       }
     } catch (e: any) {
@@ -188,7 +191,7 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
     setIsResetting(true);
     try {
       // Exclui todos os documentos de rotina do Firestore
-      const q = query(collection(db, 'routines'), where('userId', '==', profile.uid));
+      const q = query(collection(db, 'routines'), where('userId', '==', currentUid));
       const snap = await getDocs(q);
       if (!snap.empty) {
         const batch = writeBatch(db);
@@ -197,9 +200,9 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
       }
 
       // Marca o perfil como rotinas limpas para não reativar padrões automaticamente
-      await updateDoc(doc(db, 'users', profile.uid), {
+      await setDoc(doc(db, 'users', currentUid), {
         routinesCleared: true
-      });
+      }, { merge: true });
     } catch (e: any) {
       console.error("Erro ao limpar rotinas", e);
       alert(`Erro ao limpar rotinas: ${e?.message || 'Falha na comunicação com o banco'}`);
@@ -214,7 +217,7 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
 
     setIsResetting(true);
     try {
-      const q = query(collection(db, 'routines'), where('userId', '==', profile.uid));
+      const q = query(collection(db, 'routines'), where('userId', '==', currentUid));
       const snap = await getDocs(q);
       if (!snap.empty) {
         const batch = writeBatch(db);
@@ -222,9 +225,9 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
         await batch.commit();
       }
 
-      await updateDoc(doc(db, 'users', profile.uid), {
+      await setDoc(doc(db, 'users', currentUid), {
         routinesCleared: false
-      });
+      }, { merge: true });
     } catch (e: any) {
       console.error("Erro ao restaurar rotinas", e);
       alert(`Erro ao restaurar rotinas: ${e?.message || 'Falha na restauração'}`);
@@ -239,7 +242,7 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
 
     setIsResetting(true);
     try {
-      const q = query(collection(db, 'tasks'), where('userId', '==', profile.uid));
+      const q = query(collection(db, 'tasks'), where('userId', '==', currentUid));
       const snap = await getDocs(q);
       const batch = writeBatch(db);
       snap.docs.forEach(d => batch.delete(d.ref));
