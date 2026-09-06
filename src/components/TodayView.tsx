@@ -24,6 +24,15 @@ import {
 } from 'lucide-react';
 import { format, parseISO, isSameDay } from 'date-fns';
 import { cn, sendBrowserNotification } from '../lib/utils';
+import { 
+  notifyTaskStart, 
+  notifyTaskWarning5Min, 
+  notifyTaskEnd, 
+  notifyOverthinking,
+  notifyWorkdayEnd,
+  notifyTimelineTaskStarting,
+  soundEngine
+} from '../lib/notificationEngine';
 import { buildDailyTimeline, DailyTimelineResult, TimeSlot } from '../lib/smartScheduler';
 import { calculateRealPriority } from '../lib/priorityEngine';
 
@@ -98,9 +107,7 @@ export function TodayView({
           if (elapsed >= maxAllowedSeconds && !showOverthinkingModal && currentTask) {
             setOverthinkingTask(currentTask);
             setShowOverthinkingModal(true);
-            sendBrowserNotification('FlowLife - Alerta de Overthinking', {
-              body: `Você ultrapassou o limite máximo para "${currentTask.title}". Hora de decidir se conclui ou realoca!`
-            });
+            notifyOverthinking(currentTask.title, Math.round(maxAllowedSeconds / 60));
           }
 
           return { ...prev, timeLeft: newTimeLeft };
@@ -119,21 +126,46 @@ export function TodayView({
     if (!task) return;
 
     if (timeLeft <= 300 && timeLeft > 0 && !profile.dailyState.notified5Min) {
-      sendBrowserNotification('FlowLife', { 
-        body: `Faltam 5 minutos para encerrar a tarefa: ${task.title}` 
-      });
+      notifyTaskWarning5Min(task.title, profile.webhookUrl5Min || profile.webhookUrl);
       updateDoc(doc(db, 'users', profile.uid), {
         'dailyState.notified5Min': true
       }).catch(console.error);
     } else if (timeLeft <= 0 && !profile.dailyState.notifiedEnd) {
-      sendBrowserNotification('FlowLife', { 
-        body: `Tarefa "${task.title}" encerrada. Retorne ao app para começar a próxima!` 
-      });
+      notifyTaskEnd(task.title, profile.webhookUrlEnd || profile.webhookUrl);
       updateDoc(doc(db, 'users', profile.uid), {
         'dailyState.notifiedEnd': true
       }).catch(console.error);
     }
-  }, [activeTimer?.timeLeft, profile.dailyState, tasks, profile.uid]);
+  }, [activeTimer?.timeLeft, profile.dailyState, tasks, profile.uid, profile.webhookUrl, profile.webhookUrl5Min, profile.webhookUrlEnd]);
+
+  // Checagem de Tarefas Agendadas na Timeline e Horário de Encerramento do Expediente
+  useEffect(() => {
+    const notifiedMap = new Set<string>();
+    const checkScheduleInterval = setInterval(() => {
+      const now = new Date();
+      const currentHM = format(now, 'HH:mm');
+
+      // 1. Alerta de Encerramento do Expediente
+      const workEnd = profile.workEndTime || '19:00';
+      if (currentHM === workEnd && !notifiedMap.has(`workend-${currentHM}`)) {
+        notifiedMap.add(`workend-${currentHM}`);
+        notifyWorkdayEnd(workEnd, profile.webhookUrlEnd || profile.webhookUrl);
+      }
+
+      // 2. Alerta de Tarefas Agendadas para o Horário Atual
+      tasks.forEach(t => {
+        if (t.status === 'pending' && t.scheduledStartTime === currentHM) {
+          const key = `task-start-${t.id}-${currentHM}`;
+          if (!notifiedMap.has(key) && profile.dailyState?.currentTaskId !== t.id) {
+            notifiedMap.add(key);
+            notifyTimelineTaskStarting(t.title, currentHM);
+          }
+        }
+      });
+    }, 30000); // Checa a cada 30s
+
+    return () => clearInterval(checkScheduleInterval);
+  }, [tasks, profile.workEndTime, profile.webhookUrl, profile.webhookUrlEnd, profile.dailyState?.currentTaskId]);
 
   // Iniciar Tarefa no Modo Foco
   const handleStartTask = async (task: Task) => {
@@ -160,23 +192,8 @@ export function TodayView({
         isPaused: false
       });
 
-      sendBrowserNotification('FlowLife', { 
-        body: `Iniciando: ${task.title} (${totalMinutes} min planejados)` 
-      });
-
-      // Disparo do Webhook de Início
-      if (profile.webhookUrlStart) {
-        fetch(profile.webhookUrlStart, {
-          method: 'POST',
-          mode: 'no-cors',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            evento: "atividadeIniciada", 
-            tarefa: task.title,
-            tempoEstimado: totalMinutes
-          })
-        }).catch(console.error);
-      }
+      // Disparar Notificação Sonora e Webhook de Início
+      notifyTaskStart(task.title, totalMinutes, profile.webhookUrlStart || profile.webhookUrl);
     } catch (e) {
       console.error("Erro ao iniciar tarefa:", e);
     }
@@ -213,6 +230,9 @@ export function TodayView({
           'dailyState.active': false
         });
       }
+
+      // Tocar som de vitória/conclusão
+      soundEngine.play('end');
 
       sendBrowserNotification('FlowLife', { 
         body: `Tarefa concluída: "${task.title}" em ${actualMinutes} minutos!` 

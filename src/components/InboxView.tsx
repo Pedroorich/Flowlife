@@ -13,7 +13,11 @@ import {
   FolderKanban, 
   Trash2, 
   Check, 
-  Calendar 
+  Calendar,
+  Mic,
+  MicOff,
+  Square,
+  Radio
 } from 'lucide-react';
 import { GoogleGenAI } from '@google/genai';
 import { format } from 'date-fns';
@@ -53,12 +57,92 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
 
   // AI Chat State
   const [messages, setMessages] = useState<{role: 'user' | 'ai', text: string}[]>([
-    { role: 'ai', text: 'Olá, Pedro! Me conte qual é o seu objetivo, tarefa ou oferta. Se for um projeto grande (ex: criar 10 criativos, gravar curso, planejar lançamento), eu vou fracioná-lo em blocos ideais que respeitem seu horário de encerramento.' }
+    { role: 'ai', text: 'Olá, Pedro! Me conte ou fale qual é o seu objetivo, tarefas ou a rotina que você vai ter hoje. Você pode simplesmente falar no microfone que eu entendo sua rotina completa, horários de treino, compromissos e tarefas, fracionando tudo para respeitar seu horário de encerramento.' }
   ]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [proposedTasks, setProposedTasks] = useState<Partial<Task>[] | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Voice Input State (Speech-to-Text)
+  const [isRecordingAI, setIsRecordingAI] = useState(false);
+  const [isRecordingQuick, setIsRecordingQuick] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const recognitionRef = useRef<any>(null);
+
+  const startVoiceInput = (target: 'ai' | 'quick') => {
+    setVoiceError(null);
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setVoiceError('Reconhecimento de voz não suportado diretamente neste navegador. No iPhone, abra no Safari ou adicione à Tela de Início.');
+      return;
+    }
+
+    try {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch (_) {}
+      }
+
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'pt-BR';
+      recognition.continuous = true;
+      recognition.interimResults = true;
+
+      if (target === 'ai') {
+        setIsRecordingAI(true);
+        setIsRecordingQuick(false);
+      } else {
+        setIsRecordingQuick(true);
+        setIsRecordingAI(false);
+      }
+
+      recognition.onresult = (event: any) => {
+        let currentTranscript = '';
+        for (let i = 0; i < event.results.length; i++) {
+          currentTranscript += event.results[i][0].transcript;
+        }
+        if (target === 'ai') {
+          setInput(currentTranscript);
+        } else {
+          setQuickText(currentTranscript);
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.warn('Erro voz:', event.error);
+        if (event.error === 'not-allowed') {
+          setVoiceError('Permissão do microfone negada. Autorize o microfone para falar suas tarefas.');
+        } else if (event.error !== 'no-speech') {
+          setVoiceError(`Aviso do microfone: ${event.error}`);
+        }
+        setIsRecordingAI(false);
+        setIsRecordingQuick(false);
+      };
+
+      recognition.onend = () => {
+        setIsRecordingAI(false);
+        setIsRecordingQuick(false);
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err) {
+      console.error('Falha ao iniciar microfone:', err);
+      setVoiceError('Não foi possível ativar o microfone.');
+      setIsRecordingAI(false);
+      setIsRecordingQuick(false);
+    }
+  };
+
+  const stopVoiceInput = () => {
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (_) {}
+    }
+    setIsRecordingAI(false);
+    setIsRecordingQuick(false);
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -158,36 +242,45 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       
-      const systemPrompt = `Você é o assistente de IA do FlowLife.
+      const systemPrompt = `Você é o assistente executivo e estrategista de IA do FlowLife.
 O usuário é o Pedro (trabalha com marketing digital, ofertas validadas, tráfego orgânico, projetos paralelos, treinos de musculação, Jiu-Jitsu e igreja).
-O objetivo é receber metas/demandas e fracioná-las em blocos executáveis de 30 a 90 minutos com limite de tempo contra overthinking.
+O usuário pode tanto digitar quanto FALAR livremente por voz sobre a rotina que ele vai ter, tarefas do dia, compromissos ou projetos complexos (ex: "amanhã preciso acordar às 7h, treinar Jiu-jitsu às 9h, depois gravar criativos da oferta A, almoçar às 12h30, reunião com cliente às 14h e encerrar às 19h").
+
+Seu papel é:
+1. Analisar a fala ou texto do usuário.
+2. Identificar tanto tarefas executáveis quanto blocos de rotina/compromissos fixos (treinos, reuniões, almoço, culto).
+3. Respeitar o horário inegociável de encerramento do expediente das ${profile.workEndTime || '19:00'}.
+4. Fracionar projetos em blocos práticos de 30 a 90 minutos com limite de tempo máximo contra overthinking.
 
 RESPONDA SEMPRE EM JSON no seguinte formato:
-Se precisar perguntar algo:
+Se precisar perguntar algo ou esclarecer uma dúvida:
 {
   "action": "reply",
-  "message": "Sua pergunta aqui..."
+  "message": "Sua resposta estratégica e direta aqui..."
 }
 
-Se tiver informações suficientes para criar as tarefas:
+Se tiver informações suficientes para criar as tarefas/rotinas na agenda:
 {
   "action": "create_tasks",
-  "message": "Aqui está o plano estratégico fracionado...",
+  "message": "Entendi perfeitamente sua rotina e tarefas! Aqui está o plano estratégico fracionado:",
   "tasks": [
     {
-      "title": "Nome da subtarefa",
+      "title": "Nome claro da tarefa ou compromisso",
       "type": "Tarefa",
       "area": "Trabalho",
       "priority": "Alta",
       "urgency": 4,
       "impact": 5,
       "timeEstimate": 45,
-      "timeMax": 75
+      "timeMax": 75,
+      "scheduledStartTime": "09:00",
+      "isFixed": false
     }
   ]
 }
 
-Áreas válidas: ${profile.activeAreas.join(', ')}.
+Tipos válidos: "Projeto", "Tarefa", "Compromisso", "Entrega", "Reunião", "Meta", "Hábito", "Outro".
+Áreas ativas válidas: ${profile.activeAreas.join(', ')}.
 Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
 
       const chatHistory = messages.map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.text}`).join('\n');
@@ -212,7 +305,7 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
 
     } catch (error) {
       console.error("AI Error", error);
-      setMessages(prev => [...prev, { role: 'ai', text: "Desculpe, tive um problema ao processar isso. Tente novamente." }]);
+      setMessages(prev => [...prev, { role: 'ai', text: "Desculpe, tive um problema ao processar sua solicitação por voz/texto. Poderia repetir?" }]);
     } finally {
       setIsTyping(false);
     }
@@ -223,18 +316,22 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
     setLoading(true);
     try {
       const batch = writeBatch(db);
+      const todayKey = format(new Date(), 'yyyy-MM-dd');
       
       proposedTasks.forEach(pt => {
         const docRef = doc(collection(db, 'tasks'));
         const newTask: Omit<Task, 'id'> = {
           title: pt.title || 'Tarefa sem nome',
-          type: pt.type as TaskType || 'Tarefa',
-          area: pt.area as LifeArea || profile.activeAreas[0] || 'Trabalho',
-          priority: pt.priority as Priority || 'Média',
+          type: (pt.type as TaskType) || 'Tarefa',
+          area: (pt.area as LifeArea) || profile.activeAreas[0] || 'Trabalho',
+          priority: (pt.priority as Priority) || 'Média',
           urgency: pt.urgency || 3,
           impact: pt.impact || 3,
           timeEstimate: pt.timeEstimate || 45,
           timeMax: pt.timeMax || Math.round((pt.timeEstimate || 45) * 1.5),
+          scheduledStartTime: pt.scheduledStartTime || undefined,
+          isFixed: pt.isFixed ?? (pt.type === 'Compromisso' || pt.type === 'Reunião'),
+          dateAllocated: pt.scheduledStartTime ? todayKey : undefined,
           status: 'pending',
           userId: profile.uid,
           createdAt: new Date().toISOString()
@@ -244,7 +341,7 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
 
       await batch.commit();
       setProposedTasks(null);
-      setMessages(prev => [...prev, { role: 'ai', text: "✅ Tarefas salvas no Backlog! O algoritmo do FlowLife já está priorizando e encaixando-as na sua agenda." }]);
+      setMessages(prev => [...prev, { role: 'ai', text: "✅ Tarefas e rotinas salvas com sucesso! O FlowLife já sincronizou sua agenda e ativou os lembretes." }]);
     } catch (error) {
       console.error("Error saving AI tasks", error);
     } finally {
@@ -299,21 +396,61 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
         <div className="bg-surface border border-border rounded-2xl p-6">
           <h3 className="text-base font-bold text-white mb-2">Entrada Sem Atrito</h3>
           <p className="text-xs text-gray-400 mb-4">
-            Digite o que precisa ser feito. O FlowLife detecta se é uma tarefa, compromisso ou duração estimada.
+            Digite ou fale o que precisa ser feito. O FlowLife detecta se é uma tarefa, compromisso ou duração estimada.
           </p>
 
+          {isRecordingQuick && (
+            <div className="flex items-center justify-between p-3 bg-accent-amber/10 border border-accent-amber/30 rounded-xl mb-3 animate-pulse">
+              <div className="flex items-center gap-2 text-xs font-semibold text-accent-amber">
+                <span className="w-2.5 h-2.5 rounded-full bg-accent-amber animate-ping" />
+                <Radio className="w-4 h-4 text-accent-amber" />
+                Ouvindo... Fale sua tarefa ou compromisso.
+              </div>
+              <button 
+                type="button"
+                onClick={stopVoiceInput}
+                className="px-3 py-1 bg-accent-amber text-background rounded-lg text-xs font-bold hover:bg-amber-400 transition-colors flex items-center gap-1 shadow-sm"
+              >
+                <Square className="w-3 h-3 fill-current" />
+                Concluir
+              </button>
+            </div>
+          )}
+
+          {voiceError && (
+            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl mb-3 text-xs text-red-400 flex items-center justify-between">
+              <span>{voiceError}</span>
+              <button onClick={() => setVoiceError(null)} className="text-red-300 font-bold ml-2">✕</button>
+            </div>
+          )}
+
           <form onSubmit={handleQuickCapture} className="space-y-3">
-            <input 
-              type="text"
-              value={quickText}
-              onChange={e => setQuickText(e.target.value)}
-              placeholder="Ex: Editar 3 criativos da Oferta A 45 min..."
-              className="w-full bg-background border border-border rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-accent-amber"
-              autoFocus
-            />
+            <div className="relative flex items-center">
+              <input 
+                type="text"
+                value={quickText}
+                onChange={e => setQuickText(e.target.value)}
+                placeholder="Ex: Editar 3 criativos da Oferta A 45 min..."
+                className="w-full bg-background border border-border rounded-xl px-4 py-3 pr-12 text-sm text-white focus:outline-none focus:border-accent-amber"
+                autoFocus
+              />
+              <button
+                type="button"
+                onClick={() => isRecordingQuick ? stopVoiceInput() : startVoiceInput('quick')}
+                className={cn(
+                  "absolute right-2 p-2 rounded-lg transition-all",
+                  isRecordingQuick 
+                    ? "bg-red-500 text-white animate-pulse" 
+                    : "text-gray-400 hover:text-accent-amber hover:bg-white/5"
+                )}
+                title={isRecordingQuick ? "Parar gravação" : "Falar por voz"}
+              >
+                {isRecordingQuick ? <Square className="w-4 h-4 fill-current" /> : <Mic className="w-4 h-4" />}
+              </button>
+            </div>
 
             <div className="flex justify-between items-center text-xs text-gray-500">
-              <span>Dica: inclua '15m', '45 min' ou 'reunião' para autodetecção</span>
+              <span>Dica: fale '15m', '45 min' ou 'reunião' para autodetecção</span>
               <button 
                 type="submit"
                 disabled={quickLoading || !quickText.trim()}
@@ -329,7 +466,7 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
 
       {/* 2. MODO IA (GEMINI) */}
       {mode === 'ai' && (
-        <div className="bg-surface border border-border rounded-2xl p-6 flex flex-col h-[520px]">
+        <div className="bg-surface border border-border rounded-2xl p-6 flex flex-col h-[560px]">
           <div className="flex-1 overflow-y-auto space-y-4 pr-2">
             {messages.map((m, i) => (
               <div 
@@ -354,24 +491,34 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
             {/* Proposta de Tarefas da IA */}
             {proposedTasks && (
               <div className="bg-background border-2 border-accent-amber/40 rounded-xl p-4 space-y-3">
-                <h4 className="text-xs font-bold text-accent-amber uppercase tracking-wider">
-                  Plano Estratégico Sugerido
-                </h4>
-                <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold text-accent-amber uppercase tracking-wider">
+                    Plano Estratégico Sugerido
+                  </h4>
+                  <span className="text-[10px] text-gray-400">{proposedTasks.length} itens</span>
+                </div>
+                <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                   {proposedTasks.map((pt, idx) => (
                     <div key={idx} className="flex justify-between items-center text-xs bg-white/5 px-3 py-2 rounded-lg">
-                      <span className="font-medium text-white">{pt.title}</span>
-                      <span className="font-mono text-accent-amber font-bold">{pt.timeEstimate} min</span>
+                      <div className="flex items-center gap-2 truncate pr-2">
+                        {pt.scheduledStartTime && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-accent-amber/20 text-accent-amber rounded font-mono font-bold">
+                            {pt.scheduledStartTime}
+                          </span>
+                        )}
+                        <span className="font-medium text-white truncate">{pt.title}</span>
+                      </div>
+                      <span className="font-mono text-accent-amber font-bold shrink-0">{pt.timeEstimate} min</span>
                     </div>
                   ))}
                 </div>
                 <button 
                   onClick={confirmAITasks}
                   disabled={loading}
-                  className="w-full py-2.5 bg-accent-emerald text-background font-bold rounded-lg text-xs hover:bg-emerald-400 transition-colors flex items-center justify-center gap-1.5"
+                  className="w-full py-2.5 bg-accent-emerald text-background font-bold rounded-lg text-xs hover:bg-emerald-400 transition-colors flex items-center justify-center gap-1.5 shadow-md"
                 >
                   {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-                  Confirmar e Salvar no Backlog
+                  Confirmar e Salvar no Backlog & Agenda
                 </button>
               </div>
             )}
@@ -379,19 +526,62 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
             <div ref={messagesEndRef} />
           </div>
 
-          <div className="pt-4 border-t border-border mt-auto flex gap-2">
+          {/* Voice Recording Active Indicator in AI mode */}
+          {isRecordingAI && (
+            <div className="flex items-center justify-between p-3 bg-accent-amber/10 border border-accent-amber/30 rounded-xl mt-3 mb-1 animate-pulse">
+              <div className="flex items-center gap-2 text-xs font-semibold text-accent-amber">
+                <span className="w-2.5 h-2.5 rounded-full bg-accent-amber animate-ping" />
+                <Radio className="w-4 h-4 text-accent-amber animate-pulse" />
+                Ouvindo sua rotina e tarefas... Fale naturalmente!
+              </div>
+              <button 
+                type="button"
+                onClick={stopVoiceInput}
+                className="px-3 py-1 bg-accent-amber text-background rounded-lg text-xs font-bold hover:bg-amber-400 transition-colors flex items-center gap-1 shadow-sm"
+              >
+                <Square className="w-3 h-3 fill-current" />
+                Concluir Fala
+              </button>
+            </div>
+          )}
+
+          {voiceError && (
+            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl mt-3 mb-1 text-xs text-red-400 flex items-center justify-between">
+              <span>{voiceError}</span>
+              <button onClick={() => setVoiceError(null)} className="text-red-300 font-bold ml-2">✕</button>
+            </div>
+          )}
+
+          {/* Input Bar with Voice Button & Send */}
+          <div className="pt-3 border-t border-border mt-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => isRecordingAI ? stopVoiceInput() : startVoiceInput('ai')}
+              className={cn(
+                "p-2.5 rounded-xl font-bold transition-all flex items-center justify-center shrink-0",
+                isRecordingAI 
+                  ? "bg-red-500 text-white animate-pulse shadow-lg shadow-red-500/30" 
+                  : "bg-background border border-accent-amber/40 text-accent-amber hover:bg-accent-amber/10"
+              )}
+              title={isRecordingAI ? "Parar gravação" : "Falar minhas tarefas/rotina (Voz)"}
+            >
+              {isRecordingAI ? <Square className="w-4 h-4 fill-current" /> : <Mic className="w-4 h-4" />}
+            </button>
+
             <input 
               type="text"
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleSendAI()}
-              placeholder="Ex: Preciso validar uma nova oferta neste nicho..."
-              className="flex-1 bg-background border border-border rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-accent-amber"
+              placeholder={isRecordingAI ? "Ouvindo... Transcrevendo sua fala..." : "Fale pelo microfone ou digite sua rotina..."}
+              className="flex-1 bg-background border border-border rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-accent-amber placeholder:text-gray-500"
             />
+
             <button 
               onClick={handleSendAI}
               disabled={isTyping || !input.trim()}
-              className="px-4 py-2.5 bg-accent-amber text-background font-bold rounded-xl hover:bg-amber-400 transition-colors disabled:opacity-50"
+              className="px-4 py-2.5 bg-accent-amber text-background font-bold rounded-xl hover:bg-amber-400 transition-colors disabled:opacity-50 shrink-0"
+              title="Enviar para a IA"
             >
               <Send className="w-4 h-4" />
             </button>

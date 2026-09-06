@@ -28,7 +28,7 @@ import { DashboardView } from './components/DashboardView';
 import { NotificationsView } from './components/NotificationsView';
 import { SettingsView } from './components/SettingsView';
 
-type Tab = 'today' | 'weekly' | 'projects' | 'routines' | 'inbox' | 'dashboard' | 'monthly' | 'settings';
+type Tab = 'today' | 'weekly' | 'projects' | 'routines' | 'inbox' | 'dashboard' | 'monthly' | 'notifications' | 'settings';
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -173,6 +173,7 @@ export default function App() {
     { id: 'inbox', icon: Inbox, label: 'Backlog' },
     { id: 'dashboard', icon: LayoutDashboard, label: 'Equilíbrio' },
     { id: 'monthly', icon: CalendarDays, label: 'Mês' },
+    { id: 'notifications', icon: Bell, label: 'Alertas' },
     { id: 'settings', icon: Settings, label: 'Config' },
   ] as const;
 
@@ -294,6 +295,9 @@ export default function App() {
                 tasks={tasks} 
                 unforeseenEvents={unforeseenEvents} 
               />
+            )}
+            {activeTab === 'notifications' && (
+              <NotificationsView profile={profile} />
             )}
             {activeTab === 'settings' && (
               <SettingsView profile={profile} />
