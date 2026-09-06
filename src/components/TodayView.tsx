@@ -951,6 +951,7 @@ export function TodayView({
           onClose={() => setCopilotTask(null)}
           onUpdateTaskNotes={handleUpdateTaskNotes}
           availableAgents={DEFAULT_AI_AGENTS}
+          profile={profile}
           onSwitchAgent={handleSwitchCopilotAgent}
         />
       )}

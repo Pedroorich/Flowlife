@@ -126,6 +126,9 @@ export interface UserProfile {
   webhookUrlStart?: string;
   webhookUrl5Min?: string;
   webhookUrlEnd?: string;
+
+  // Inteligência Artificial
+  geminiApiKey?: string;
   
   routinesCleared?: boolean;
   

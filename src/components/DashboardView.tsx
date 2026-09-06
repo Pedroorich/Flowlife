@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Task, UserProfile, Project } from '../types';
-import { GoogleGenAI } from '@google/genai';
+import { getGeminiApiKey, callGemini } from '../lib/gemini';
 import { 
   Loader2, 
   Sparkles, 
@@ -21,44 +21,41 @@ import {
 import { cn } from '../lib/utils';
 
 interface DashboardViewProps {
-  profile: UserProfile;
   tasks: Task[];
+  profile: UserProfile;
   projects?: Project[];
 }
 
-export function DashboardView({ profile, tasks, projects = [] }: DashboardViewProps) {
-  const [insight, setInsight] = useState<string>('');
+export function DashboardView({ tasks, profile, projects = [] }: DashboardViewProps) {
+  const [insight, setInsight] = useState<string | null>(null);
   const [loadingInsight, setLoadingInsight] = useState(false);
 
+  // Cálculos Básicos
   const completedTasks = tasks.filter(t => t.status === 'completed');
   const pendingTasks = tasks.filter(t => t.status === 'pending');
-  
-  const overdueTasks = pendingTasks.filter(t => 
-    t.deadline && new Date(t.deadline).getTime() < new Date().setHours(0,0,0,0)
-  );
+  const overdueTasks = tasks.filter(t => {
+    if (t.status === 'completed' || !t.deadline) return false;
+    return new Date(t.deadline) < new Date(new Date().setHours(0, 0, 0, 0));
+  });
 
-  const totalMinutesInvested = completedTasks.reduce((sum, t) => sum + (t.actualDuration || t.timeEstimate || 30), 0);
-  const hoursInvested = Math.round(totalMinutesInvested / 60 * 10) / 10;
+  const totalMinutes = completedTasks.reduce((acc, t) => acc + (t.actualDuration || t.timeEstimate || 0), 0);
+  const hoursInvested = (totalMinutes / 60).toFixed(1);
 
-  // Análise de Equilíbrio de Vida
+  // Análises do Motor Adaptativo
   const lifeBalance = calculateLifeBalance(tasks);
-
-  // Análise de Precisão de Estimativas (Detector de Overthinking)
   const estimationInsights = analyzeEstimationAccuracy(completedTasks);
-
-  // Saúde dos Projetos
   const projectHealth = analyzeProjectsHealth(projects, tasks);
   const stalledCount = projectHealth.filter(p => p.isStalled).length;
 
   const generateInsight = async () => {
-    if (!process.env.GEMINI_API_KEY) {
-      setInsight("Chave da API do Gemini não configurada.");
+    const apiKey = getGeminiApiKey(profile);
+    if (!apiKey) {
+      setInsight("Chave da API do Gemini não configurada. Configure na aba 'Captura & IA' ou em 'Configurações'.");
       return;
     }
 
     setLoadingInsight(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const prompt = `
         Atue como o mentor executivo e coach de vida do Pedro (profissional de marketing digital, com múltiplos projetos, ofertas validadas, treinos de musculação, Jiu-Jitsu e igreja).
         Analise os dados de execução dele:
@@ -76,12 +73,12 @@ export function DashboardView({ profile, tasks, projects = [] }: DashboardViewPr
         Máximo de 3 parágrafos curtos.
       `;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-pro-preview',
-        contents: prompt,
+      const responseText = await callGemini({
+        apiKey,
+        prompt
       });
 
-      setInsight(response.text || "Continue focado no que gera maior impacto!");
+      setInsight(responseText || "Continue focado no que gera maior impacto!");
     } catch (error) {
       console.error("Error generating insight", error);
       setInsight("Não foi possível gerar o diagnóstico no momento.");

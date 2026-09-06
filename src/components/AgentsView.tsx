@@ -361,6 +361,7 @@ export function AgentsView({ profile, tasks, customAgents = [], onAgentCreated }
           isOpen={!!testingAgent}
           onClose={() => setTestingAgent(null)}
           availableAgents={allAgents}
+          profile={profile}
           onSwitchAgent={(id) => {
             const found = allAgents.find(a => a.id === id);
             if (found) setTestingAgent(found);

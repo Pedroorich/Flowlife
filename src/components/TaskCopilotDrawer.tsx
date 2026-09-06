@@ -18,10 +18,10 @@ import {
   ArrowRight, 
   ChevronDown 
 } from 'lucide-react';
-import { GoogleGenAI } from '@google/genai';
-import { Task, AIAgent } from '../types';
+import { Task, AIAgent, UserProfile } from '../types';
 import { cn } from '../lib/utils';
 import { soundEngine } from '../lib/notificationEngine';
+import { getGeminiApiKey, callGemini } from '../lib/gemini';
 
 interface TaskCopilotDrawerProps {
   task: Task;
@@ -31,6 +31,7 @@ interface TaskCopilotDrawerProps {
   onUpdateTaskNotes?: (notes: string) => Promise<void>;
   availableAgents?: AIAgent[];
   onSwitchAgent?: (newAgentId: string) => void;
+  profile?: UserProfile;
 }
 
 export function TaskCopilotDrawer({
@@ -40,7 +41,8 @@ export function TaskCopilotDrawer({
   onClose,
   onUpdateTaskNotes,
   availableAgents = [],
-  onSwitchAgent
+  onSwitchAgent,
+  profile
 }: TaskCopilotDrawerProps) {
   const [messages, setMessages] = useState<{ role: 'user' | 'agent'; text: string; id: string }[]>([
     {
@@ -75,11 +77,38 @@ export function TaskCopilotDrawer({
     }
   };
 
+  const copilotTranscriptRef = useRef('');
+
   const handleSendMessage = async (customPrompt?: string) => {
-    const textToSend = (customPrompt || input).trim();
-    if (!textToSend || !process.env.GEMINI_API_KEY) return;
+    if (isRecording) {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch (_) {}
+      }
+      setIsRecording(false);
+    }
+
+    let textToSend = (customPrompt || input).trim();
+    if (!textToSend && copilotTranscriptRef.current.trim()) {
+      textToSend = copilotTranscriptRef.current.trim();
+    }
+
+    const apiKey = getGeminiApiKey(profile);
+    if (!apiKey) {
+      setMessages(prev => [
+        ...prev,
+        {
+          role: 'agent',
+          text: '⚠️ **Chave da API do Google Gemini não encontrada.**\n\nPor favor, insira sua chave gratuita do Gemini na aba **"Captura & IA"** ou em **"Configurações"** para conversar com os Agentes Copilotos.',
+          id: `err-${Date.now()}`
+        }
+      ]);
+      return;
+    }
+
+    if (!textToSend) return;
 
     if (!customPrompt) setInput('');
+    copilotTranscriptRef.current = '';
 
     const userMessageId = `user-${Date.now()}`;
     const newHistory = [...messages, { role: 'user' as const, text: textToSend, id: userMessageId }];
@@ -87,8 +116,6 @@ export function TaskCopilotDrawer({
     setLoading(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      
       const prompt = `
 ${agent.systemPrompt}
 
@@ -104,21 +131,21 @@ ${newHistory.map(m => `${m.role === 'user' ? 'Usuário' : agent.name}: ${m.text}
 
 Responda de forma altamente prática, direta e estruturada para que o usuário possa aplicar imediatamente na tarefa agora!`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-pro-preview',
-        contents: prompt
+      const responseText = await callGemini({
+        apiKey,
+        prompt
       });
 
-      const responseText = response.text || 'Não consegui formular uma resposta no momento.';
       setMessages(prev => [
         ...prev, 
-        { role: 'agent', text: responseText, id: `agent-${Date.now()}` }
+        { role: 'agent', text: responseText || 'Não consegui formular uma resposta no momento.', id: `agent-${Date.now()}` }
       ]);
-    } catch (e) {
+    } catch (e: any) {
       console.error('Erro no copiloto:', e);
+      const msg = e?.message || 'Erro de conexão com a IA.';
       setMessages(prev => [
         ...prev,
-        { role: 'agent', text: 'Desculpe, tive um problema de conexão com a IA. Poderia tentar novamente?', id: `err-${Date.now()}` }
+        { role: 'agent', text: `Desculpe, tive um problema ao conectar com a IA (${msg}). Verifique sua chave da API ou tente novamente.`, id: `err-${Date.now()}` }
       ]);
     } finally {
       setLoading(false);
@@ -152,11 +179,12 @@ Responda de forma altamente prática, direta e estruturada para que o usuário p
 
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      alert('Reconhecimento de voz não suportado neste navegador.');
+      alert('Reconhecimento de voz não suportado diretamente neste navegador.');
       return;
     }
 
     try {
+      copilotTranscriptRef.current = '';
       const recognition = new SpeechRecognition();
       recognition.lang = 'pt-BR';
       recognition.continuous = false;
@@ -169,6 +197,7 @@ Responda de forma altamente prática, direta e estruturada para que o usuário p
         for (let i = 0; i < event.results.length; i++) {
           transcript += event.results[i][0].transcript;
         }
+        copilotTranscriptRef.current = transcript;
         setInput(transcript);
       };
 
@@ -344,9 +373,9 @@ Responda de forma altamente prática, direta e estruturada para que o usuário p
 
           <button
             onClick={() => handleSendMessage()}
-            disabled={loading || !input.trim()}
+            disabled={loading || (!input.trim() && !isRecording)}
             className="px-4 py-2.5 bg-accent-amber text-background font-bold rounded-xl hover:bg-amber-400 transition-colors disabled:opacity-50 shrink-0"
-            title="Enviar mensagem"
+            title={isRecording ? "Parar e Enviar" : "Enviar mensagem"}
           >
             <Send className="w-4 h-4" />
           </button>

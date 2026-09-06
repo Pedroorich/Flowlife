@@ -183,7 +183,7 @@ export default function App() {
     { id: 'projects', icon: FolderKanban, label: 'Projetos' },
     { id: 'agents', icon: Bot, label: 'Agentes' },
     { id: 'routines', icon: Flame, label: 'Rotinas' },
-    { id: 'inbox', icon: Inbox, label: 'Backlog' },
+    { id: 'inbox', icon: Sparkles, label: 'Captura & IA' },
     { id: 'dashboard', icon: LayoutDashboard, label: 'Equilíbrio' },
     { id: 'monthly', icon: CalendarDays, label: 'Mês' },
     { id: 'notifications', icon: Bell, label: 'Alertas' },

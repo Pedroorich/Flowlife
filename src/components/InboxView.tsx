@@ -17,9 +17,12 @@ import {
   Mic,
   MicOff,
   Square,
-  Radio
+  Radio,
+  Key,
+  ExternalLink,
+  CheckCircle2
 } from 'lucide-react';
-import { GoogleGenAI } from '@google/genai';
+import { getGeminiApiKey, saveGeminiApiKey, testGeminiApiKey, callGemini } from '../lib/gemini';
 import { format } from 'date-fns';
 import { cn } from '../lib/utils';
 import { DEFAULT_AI_AGENTS } from '../lib/defaultAgents';
@@ -72,8 +75,54 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const recognitionRef = useRef<any>(null);
 
+  // Gemini API Key Management
+  const [apiKey, setApiKey] = useState<string>(() => getGeminiApiKey(profile));
+  const [showKeyConfig, setShowKeyConfig] = useState<boolean>(() => !getGeminiApiKey(profile));
+  const [keyInput, setKeyInput] = useState<string>(() => getGeminiApiKey(profile));
+  const [keySaving, setKeySaving] = useState(false);
+  const [keyMessage, setKeyMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    const k = getGeminiApiKey(profile);
+    setApiKey(k);
+    if (k && !keyInput) {
+      setKeyInput(k);
+    }
+  }, [profile]);
+
+  const handleSaveApiKey = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setKeySaving(true);
+    setKeyMessage(null);
+    try {
+      const clean = keyInput.trim();
+      if (!clean) {
+        setKeyMessage({ type: 'error', text: 'Por favor, informe a chave da API.' });
+        return;
+      }
+      const testResult = await testGeminiApiKey(clean);
+      if (!testResult.success) {
+        setKeyMessage({ type: 'error', text: `Chave inválida ou erro na API: ${testResult.error}` });
+        return;
+      }
+      await saveGeminiApiKey(clean, profile.uid);
+      setApiKey(clean);
+      setShowKeyConfig(false);
+      setVoiceError(null);
+      setKeyMessage({ type: 'success', text: 'Chave do Gemini validada e salva com sucesso!' });
+      setTimeout(() => setKeyMessage(null), 4000);
+    } catch (err: any) {
+      setKeyMessage({ type: 'error', text: err?.message || 'Erro ao validar chave.' });
+    } finally {
+      setKeySaving(false);
+    }
+  };
+
+  const transcriptRef = useRef('');
+
   const startVoiceInput = (target: 'ai' | 'quick') => {
     setVoiceError(null);
+    transcriptRef.current = '';
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
       setVoiceError('Reconhecimento de voz não suportado diretamente neste navegador. No iPhone, abra no Safari ou adicione à Tela de Início.');
@@ -103,6 +152,7 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
         for (let i = 0; i < event.results.length; i++) {
           currentTranscript += event.results[i][0].transcript;
         }
+        transcriptRef.current = currentTranscript;
         if (target === 'ai') {
           setInput(currentTranscript);
         } else {
@@ -236,16 +286,29 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
   };
 
   const handleSendAI = async () => {
-    if (!input.trim() || !process.env.GEMINI_API_KEY) return;
+    if (isRecordingAI) {
+      stopVoiceInput();
+    }
 
-    const userMsg = input.trim();
+    const currentKey = apiKey || getGeminiApiKey(profile);
+    if (!currentKey) {
+      setShowKeyConfig(true);
+      setVoiceError('Configure sua Chave da API Google Gemini acima para ativar o envio de mensagens e comandos de voz.');
+      return;
+    }
+
+    let textToSend = input.trim();
+    if (!textToSend && transcriptRef.current.trim()) {
+      textToSend = transcriptRef.current.trim();
+    }
+    if (!textToSend) return;
+
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+    setMessages(prev => [...prev, { role: 'user', text: textToSend }]);
     setIsTyping(true);
+    setVoiceError(null);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      
       const systemPrompt = `Você é o assistente executivo e estrategista de IA do FlowLife.
 O usuário é o Pedro (trabalha com marketing digital, ofertas validadas, tráfego orgânico, projetos paralelos, treinos de musculação, Jiu-Jitsu e igreja).
 O usuário pode tanto digitar quanto FALAR livremente por voz sobre a rotina que ele vai ter, tarefas do dia, compromissos ou projetos complexos (ex: "amanhã preciso acordar às 7h, treinar Jiu-jitsu às 9h, depois gravar criativos da oferta A, almoçar às 12h30, reunião com cliente às 14h e encerrar às 19h").
@@ -296,28 +359,37 @@ Tipos válidos: "Projeto", "Tarefa", "Compromisso", "Entrega", "Reunião", "Meta
 Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
 
       const chatHistory = messages.map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.text}`).join('\n');
-      const prompt = `${systemPrompt}\n\nHistórico:\n${chatHistory}\nUser: ${userMsg}\nAI:`;
+      const prompt = `Histórico:\n${chatHistory}\nUser: ${textToSend}\nAI:`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-pro-preview',
-        contents: prompt,
+      const rawResponse = await callGemini({
+        apiKey: currentKey,
+        prompt,
+        systemPrompt,
       });
 
-      let text = response.text || '';
+      let text = (rawResponse || '').trim();
       text = text.replace(/```json/g, '').replace(/```/g, '').trim();
       
-      const data = JSON.parse(text);
-
-      if (data.action === 'reply') {
-        setMessages(prev => [...prev, { role: 'ai', text: data.message }]);
-      } else if (data.action === 'create_tasks') {
-        setMessages(prev => [...prev, { role: 'ai', text: data.message }]);
-        setProposedTasks(data.tasks);
+      try {
+        const data = JSON.parse(text);
+        if (data.action === 'reply' && data.message) {
+          setMessages(prev => [...prev, { role: 'ai', text: data.message }]);
+        } else if (data.action === 'create_tasks' && data.tasks) {
+          setMessages(prev => [...prev, { role: 'ai', text: data.message || "Entendi sua rotina! Aqui está a sugestão fracionada:" }]);
+          setProposedTasks(data.tasks);
+        } else if (data.message) {
+          setMessages(prev => [...prev, { role: 'ai', text: data.message }]);
+        } else {
+          setMessages(prev => [...prev, { role: 'ai', text: rawResponse }]);
+        }
+      } catch {
+        setMessages(prev => [...prev, { role: 'ai', text: rawResponse }]);
       }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error("AI Error", error);
-      setMessages(prev => [...prev, { role: 'ai', text: "Desculpe, tive um problema ao processar sua solicitação por voz/texto. Poderia repetir?" }]);
+      const errMsg = error?.message || "Erro de conexão com a IA.";
+      setMessages(prev => [...prev, { role: 'ai', text: `Desculpe, tive um problema ao processar sua solicitação por voz/texto (${errMsg}). Verifique sua chave de API ou tente novamente.` }]);
     } finally {
       setIsTyping(false);
     }
@@ -479,7 +551,85 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
 
       {/* 2. MODO IA (GEMINI) */}
       {mode === 'ai' && (
-        <div className="bg-surface border border-border rounded-2xl p-6 flex flex-col h-[560px]">
+        <div className="bg-surface border border-border rounded-2xl p-6 flex flex-col h-[600px]">
+          {/* Header da IA com Status da Chave */}
+          <div className="mb-3 flex items-center justify-between pb-3 border-b border-border text-xs text-gray-400">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-accent-amber" />
+              <span className="font-medium text-gray-300">Assistente Estratégico FlowLife</span>
+              {apiKey ? (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] flex items-center gap-1 font-semibold">
+                  <Check className="w-3 h-3" /> IA Ativa
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[10px] flex items-center gap-1 font-semibold">
+                  <Key className="w-3 h-3" /> Chave Necessária
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowKeyConfig(!showKeyConfig)}
+              className="text-accent-amber hover:underline text-[11px] flex items-center gap-1 font-medium"
+            >
+              <Key className="w-3 h-3" />
+              {showKeyConfig ? 'Ocultar Chave' : (apiKey ? 'Alterar Chave' : 'Configurar Chave')}
+            </button>
+          </div>
+
+          {/* Card de Configuração da Chave da IA */}
+          {showKeyConfig && (
+            <div className="mb-4 bg-background/90 border border-accent-amber/30 rounded-xl p-4 text-xs space-y-3 animate-in fade-in duration-200 shadow-lg">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h4 className="font-bold text-white flex items-center gap-1.5 text-xs">
+                    <Key className="w-3.5 h-3.5 text-accent-amber" /> Chave da API Google Gemini
+                  </h4>
+                  <p className="text-gray-400 text-[11px] mt-0.5">
+                    Insira sua chave para ativar a IA e os comandos de voz. Chave 100% gratuita.
+                  </p>
+                </div>
+                <a
+                  href="https://aistudio.google.com/app/apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-2.5 py-1 bg-white/5 hover:bg-white/10 text-accent-amber rounded-lg border border-accent-amber/20 flex items-center gap-1 text-[10px] shrink-0 font-medium"
+                >
+                  Criar Chave Grátis <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+
+              <form onSubmit={handleSaveApiKey} className="flex gap-2">
+                <input
+                  type="password"
+                  value={keyInput}
+                  onChange={e => setKeyInput(e.target.value)}
+                  placeholder="Cole sua chave AIzaSy..."
+                  className="flex-1 bg-surface border border-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-accent-amber font-mono"
+                />
+                <button
+                  type="submit"
+                  disabled={keySaving || !keyInput.trim()}
+                  className="px-3.5 py-2 bg-accent-amber text-background font-bold rounded-lg hover:bg-amber-400 transition-colors disabled:opacity-50 flex items-center gap-1.5 shrink-0 text-xs shadow-sm"
+                >
+                  {keySaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                  {keySaving ? 'Testando...' : 'Salvar e Ativar'}
+                </button>
+              </form>
+
+              {keyMessage && (
+                <div className={cn(
+                  "p-2.5 rounded-lg text-xs flex items-center gap-2",
+                  keyMessage.type === 'success' 
+                    ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
+                    : "bg-red-500/10 text-red-400 border border-red-500/20"
+                )}>
+                  {keyMessage.text}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex-1 overflow-y-auto space-y-4 pr-2">
             {messages.map((m, i) => (
               <div 
@@ -592,9 +742,9 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
 
             <button 
               onClick={handleSendAI}
-              disabled={isTyping || !input.trim()}
+              disabled={isTyping || (!input.trim() && !isRecordingAI)}
               className="px-4 py-2.5 bg-accent-amber text-background font-bold rounded-xl hover:bg-amber-400 transition-colors disabled:opacity-50 shrink-0"
-              title="Enviar para a IA"
+              title={isRecordingAI ? "Parar e Enviar para a IA" : "Enviar para a IA"}
             >
               <Send className="w-4 h-4" />
             </button>
