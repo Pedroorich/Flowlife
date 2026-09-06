@@ -23,7 +23,8 @@ import {
   Check,
   RotateCcw,
   AlertTriangle,
-  Sparkles
+  Sparkles,
+  Loader2
 } from 'lucide-react';
 import { DEFAULT_ROUTINES } from '../lib/smartScheduler';
 import { cn } from '../lib/utils';
@@ -64,6 +65,7 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
 
   // Modais de Confirmação de Exclusão e Reset
   const [isResetting, setIsResetting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const handleSaveProfileBoundaries = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -120,37 +122,62 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
 
   // Excluir uma rotina individual
   const handleDeleteRoutine = async (routineId: string) => {
+    if (!routineId) return;
     if (!confirm('Deseja excluir esta rotina?')) return;
 
+    setDeletingId(routineId);
     try {
       if (routineId.startsWith('default-')) {
         // Se for um bloco padrão que ainda não estava no Firestore, inicializa o Firestore com as outras
         const defaultList = DEFAULT_ROUTINES.map((r, i) => ({ ...r, id: `default-${i}` }));
         const remaining = defaultList.filter(r => r.id !== routineId);
 
-        for (const r of remaining) {
-          await addDoc(collection(db, 'routines'), {
-            userId: profile.uid,
-            title: r.title,
-            area: r.area,
-            startTime: r.startTime,
-            endTime: r.endTime,
-            transitMinutesBefore: r.transitMinutesBefore || 0,
-            transitMinutesAfter: r.transitMinutesAfter || 0,
-            daysOfWeek: r.daysOfWeek,
-            isFixed: true,
-            createdAt: new Date().toISOString()
+        if (remaining.length === 0) {
+          // Se não sobrou nenhuma rotina padrão, marca o perfil como limpo
+          await updateDoc(doc(db, 'users', profile.uid), {
+            routinesCleared: true
+          });
+        } else {
+          // Grava atomicamente as rotinas restantes no Firestore
+          const batch = writeBatch(db);
+          for (const r of remaining) {
+            const newDocRef = doc(collection(db, 'routines'));
+            batch.set(newDocRef, {
+              userId: profile.uid,
+              title: r.title,
+              area: r.area,
+              startTime: r.startTime,
+              endTime: r.endTime,
+              transitMinutesBefore: r.transitMinutesBefore || 0,
+              transitMinutesAfter: r.transitMinutesAfter || 0,
+              daysOfWeek: r.daysOfWeek,
+              isFixed: true,
+              createdAt: new Date().toISOString()
+            });
+          }
+          await batch.commit();
+
+          await updateDoc(doc(db, 'users', profile.uid), {
+            routinesCleared: false
           });
         }
-
-        await updateDoc(doc(db, 'users', profile.uid), {
-          routinesCleared: false
-        });
       } else {
+        // Rotina real gravada no Firestore
         await deleteDoc(doc(db, 'routines', routineId));
+
+        // Se esta era a única ou última rotina existente no Firestore, marca routinesCleared: true
+        // para que as rotinas padrão não reapareçam do nada!
+        if (routines.length <= 1) {
+          await updateDoc(doc(db, 'users', profile.uid), {
+            routinesCleared: true
+          });
+        }
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error("Erro ao excluir rotina", e);
+      alert(`Erro ao excluir rotina: ${e?.message || 'Falha de comunicação com o banco de dados'}`);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -163,18 +190,19 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
       // Exclui todos os documentos de rotina do Firestore
       const q = query(collection(db, 'routines'), where('userId', '==', profile.uid));
       const snap = await getDocs(q);
-      const batch = writeBatch(db);
-      snap.docs.forEach(d => batch.delete(d.ref));
-      await batch.commit();
+      if (!snap.empty) {
+        const batch = writeBatch(db);
+        snap.docs.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+      }
 
       // Marca o perfil como rotinas limpas para não reativar padrões automaticamente
       await updateDoc(doc(db, 'users', profile.uid), {
         routinesCleared: true
       });
-
-      alert('Todas as rotinas foram excluídas. Sua agenda estrutural está 100% limpa!');
-    } catch (e) {
+    } catch (e: any) {
       console.error("Erro ao limpar rotinas", e);
+      alert(`Erro ao limpar rotinas: ${e?.message || 'Falha na comunicação com o banco'}`);
     } finally {
       setIsResetting(false);
     }
@@ -188,17 +216,18 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
     try {
       const q = query(collection(db, 'routines'), where('userId', '==', profile.uid));
       const snap = await getDocs(q);
-      const batch = writeBatch(db);
-      snap.docs.forEach(d => batch.delete(d.ref));
-      await batch.commit();
+      if (!snap.empty) {
+        const batch = writeBatch(db);
+        snap.docs.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+      }
 
       await updateDoc(doc(db, 'users', profile.uid), {
         routinesCleared: false
       });
-
-      alert('Rotinas padrão restauradas com sucesso!');
-    } catch (e) {
+    } catch (e: any) {
       console.error("Erro ao restaurar rotinas", e);
+      alert(`Erro ao restaurar rotinas: ${e?.message || 'Falha na restauração'}`);
     } finally {
       setIsResetting(false);
     }
@@ -334,17 +363,19 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
               <button 
                 onClick={handleRestoreDefaultRoutines}
                 disabled={isResetting}
-                className="apple-press px-3.5 py-2 bg-white/10 text-white rounded-xl text-xs font-medium hover:bg-white/20 transition-all flex items-center gap-1.5"
+                className="apple-press px-3.5 py-2 bg-white/10 text-white rounded-xl text-xs font-medium hover:bg-white/20 transition-all flex items-center gap-1.5 disabled:opacity-50"
               >
-                <RotateCcw className="w-3.5 h-3.5" /> Restaurar Padrões
+                {isResetting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                {isResetting ? 'Restaurando...' : 'Restaurar Padrões'}
               </button>
             ) : (
               <button 
                 onClick={handleClearAllRoutines}
                 disabled={isResetting}
-                className="apple-press px-3 py-2 bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl text-xs font-medium hover:bg-red-500/20 transition-all flex items-center gap-1.5"
+                className="apple-press px-3 py-2 bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl text-xs font-medium hover:bg-red-500/20 transition-all flex items-center gap-1.5 disabled:opacity-50"
               >
-                <Trash2 className="w-3.5 h-3.5" /> Excluir Toda a Rotina
+                {isResetting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                {isResetting ? 'Excluindo...' : 'Excluir Toda a Rotina'}
               </button>
             )}
 
@@ -422,10 +453,15 @@ export function RoutinesView({ profile, routines }: RoutinesViewProps) {
                     {/* Botão de Excluir Bloco Individual */}
                     <button 
                       onClick={() => handleDeleteRoutine(routine.id!)}
-                      className="apple-press p-2.5 rounded-xl bg-white/5 border border-white/10 hover:border-red-500/40 hover:bg-red-500/10 text-white/50 hover:text-red-400 transition-all"
+                      disabled={deletingId === routine.id}
+                      className="apple-press p-2.5 rounded-xl bg-white/5 border border-white/10 hover:border-red-500/40 hover:bg-red-500/10 text-white/50 hover:text-red-400 transition-all disabled:opacity-50"
                       title="Excluir este bloco"
                     >
-                      <Trash2 className="w-4 h-4" />
+                      {deletingId === routine.id ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-red-400" />
+                      ) : (
+                        <Trash2 className="w-4 h-4" />
+                      )}
                     </button>
                   </div>
                 </div>

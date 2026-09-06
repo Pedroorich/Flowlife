@@ -81,6 +81,8 @@ export interface SystemModificationPlan {
   message?: string;
   autoApply?: boolean;
   routines?: RoutineItemProposal[];
+  deleteRoutineTitles?: string[];
+  clearAllRoutines?: boolean;
   projects?: ProjectItemProposal[];
   tasks?: TaskItemProposal[];
   profileUpdates?: ProfileUpdateProposal;
@@ -431,6 +433,46 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
         }
       }
 
+      let deletedRoutinesCount = 0;
+      // 2.1 Excluir Rotinas se solicitado pela IA
+      if (plan?.clearAllRoutines) {
+        const q = query(collection(db, 'routines'), where('userId', '==', profile.uid));
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          const batch = writeBatch(db);
+          snap.docs.forEach(d => batch.delete(d.ref));
+          await batch.commit();
+          deletedRoutinesCount += snap.size;
+        }
+        await updateDoc(doc(db, 'users', profile.uid), {
+          routinesCleared: true
+        });
+      } else if (plan?.deleteRoutineTitles && plan.deleteRoutineTitles.length > 0) {
+        for (const titleToDelete of plan.deleteRoutineTitles) {
+          const matching = routines.filter(r => 
+            r.title.toLowerCase().trim() === titleToDelete.toLowerCase().trim()
+          );
+          for (const r of matching) {
+            if (r.id && !r.id.startsWith('default-')) {
+              await deleteDoc(doc(db, 'routines', r.id));
+              deletedRoutinesCount++;
+            }
+          }
+        }
+        if (routines.length <= deletedRoutinesCount) {
+          await updateDoc(doc(db, 'users', profile.uid), {
+            routinesCleared: true
+          });
+        }
+      }
+
+      // Se rotinas foram adicionadas e o perfil estava marcado como limpo, remove a flag
+      if (createdRoutinesCount > 0 && profile.routinesCleared) {
+        await updateDoc(doc(db, 'users', profile.uid), {
+          routinesCleared: false
+        });
+      }
+
       // 3. Criar Tarefas Fracionadas
       const tasksToCreate = plan?.tasks || proposedTasks || [];
       if (tasksToCreate.length > 0) {
@@ -501,6 +543,7 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
       });
 
       const summaryParts: string[] = [];
+      if (deletedRoutinesCount > 0) summaryParts.push(`• **${deletedRoutinesCount} Rotina(s)** removida(s) do sistema`);
       if (createdRoutinesCount > 0) summaryParts.push(`• **${createdRoutinesCount} Rotina(s) Recorrente(s)** cadastradas (Musculação, Jiu-Jitsu, Teatro, Hábitos)`);
       if (createdProjectsCount > 0) summaryParts.push(`• **${createdProjectsCount} Projeto(s)** novo(s) inicializado(s) no sistema`);
       if (createdTasksCount > 0) summaryParts.push(`• **${createdTasksCount} Tarefa(s)** agendadas e fracionadas`);
@@ -596,6 +639,10 @@ SUAS CAPACIDADES NO SISTEMA:
 
 4. 'profileUpdates': Atualização de limites de expediente e sono (wakeTime, bedTime, workStartTime, workEndTime).
 
+5. 'deleteRoutineTitles' e 'clearAllRoutines':
+   - Se o usuário pedir para excluir ou remover rotinas específicas (ex: "exclua a musculação", "remova o jiu-jitsu"), envie 'deleteRoutineTitles': ["Nome da Rotina"] com 'autoApply': true.
+   - Se o usuário pedir para apagar ou limpar todas as rotinas, envie 'clearAllRoutines': true com 'autoApply': true.
+
 COMO RESPONDER:
 SEMPRE RESPONDA EM JSON no seguinte formato:
 
@@ -682,9 +729,10 @@ REGRAS OBRIGATÓRIAS:
         const hasProjects = Array.isArray(data.projects) && data.projects.length > 0;
         const hasTasks = Array.isArray(data.tasks) && data.tasks.length > 0;
         const hasProfile = Boolean(data.profileUpdates && Object.keys(data.profileUpdates).length > 0);
-        const hasStructuredChanges = hasRoutines || hasProjects || hasTasks || hasProfile;
+        const hasDeletions = Boolean(data.clearAllRoutines || (data.deleteRoutineTitles && data.deleteRoutineTitles.length > 0));
+        const hasStructuredChanges = hasRoutines || hasProjects || hasTasks || hasProfile || hasDeletions;
 
-        const isUserAskingToApply = /\b(adicione|adicionar|coloque|colocar|salve|salvar|monte|montar|aplique|aplicar|insira|inserir|grave|gravar|configure|configurar|cadastre|cadastrar|integre|integrar)\b/i.test(textToSend);
+        const isUserAskingToApply = /\b(adicione|adicionar|coloque|colocar|salve|salvar|monte|montar|aplique|aplicar|insira|inserir|grave|gravar|configure|configurar|cadastre|cadastrar|integre|integrar|exclua|excluir|apague|apagar|remova|remover|limpe|limpar)\b/i.test(textToSend);
 
         if (data.message) {
           setMessages(prev => [...prev, { role: 'ai', text: data.message! }]);
