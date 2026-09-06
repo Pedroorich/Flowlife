@@ -22,6 +22,7 @@ import {
 import { GoogleGenAI } from '@google/genai';
 import { format } from 'date-fns';
 import { cn } from '../lib/utils';
+import { DEFAULT_AI_AGENTS } from '../lib/defaultAgents';
 
 const TASK_TYPES: TaskType[] = ["Projeto", "Tarefa", "Compromisso", "Entrega", "Reunião", "Meta", "Hábito", "Outro"];
 const PRIORITIES: Priority[] = ["Alta", "Média", "Baixa"];
@@ -52,6 +53,7 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
   const [timeEstimate, setTimeEstimate] = useState(45);
   const [timeMax, setTimeMax] = useState(75);
   const [notes, setNotes] = useState('');
+  const [assignedAgentId, setAssignedAgentId] = useState<string>('');
   const [isFixed, setIsFixed] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -208,6 +210,7 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
         timeEstimate: Number(timeEstimate),
         timeMax: Number(timeMax) || Math.round(Number(timeEstimate) * 1.5),
         notes: notes.trim(),
+        assignedAgentId: assignedAgentId || undefined,
         status: 'pending',
         isFixed,
         userId: profile.uid,
@@ -222,6 +225,7 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
       setEndDate('');
       setTimeEstimate(45);
       setTimeMax(75);
+      setAssignedAgentId('');
       setIsFixed(false);
       alert('Tarefa adicionada com sucesso!');
     } catch (error) {
@@ -274,10 +278,18 @@ Se tiver informações suficientes para criar as tarefas/rotinas na agenda:
       "timeEstimate": 45,
       "timeMax": 75,
       "scheduledStartTime": "09:00",
-      "isFixed": false
+      "isFixed": false,
+      "assignedAgentId": "agent-instagram-creator"
     }
   ]
 }
+
+Agentes Copilotos disponíveis para o campo 'assignedAgentId' (se aplicável):
+- "agent-instagram-creator" (para Reels, gravação de vídeos, posts, Instagram, criativos)
+- "agent-study-tutor" (para tarefas de estudo, aprendizado, leitura, provas, resumos)
+- "agent-marketing-strategist" (para ofertas, tráfego, vendas, páginas, copywriting)
+- "agent-fitness-coach" (para treinos, musculação, Jiu-Jitsu)
+- "agent-executive-writer" (para e-mails, propostas, alinhamentos executivos)
 
 Tipos válidos: "Projeto", "Tarefa", "Compromisso", "Entrega", "Reunião", "Meta", "Hábito", "Outro".
 Áreas ativas válidas: ${profile.activeAreas.join(', ')}.
@@ -331,6 +343,7 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
           timeMax: pt.timeMax || Math.round((pt.timeEstimate || 45) * 1.5),
           scheduledStartTime: pt.scheduledStartTime || undefined,
           isFixed: pt.isFixed ?? (pt.type === 'Compromisso' || pt.type === 'Reunião'),
+          assignedAgentId: pt.assignedAgentId || undefined,
           dateAllocated: pt.scheduledStartTime ? todayKey : undefined,
           status: 'pending',
           userId: profile.uid,
@@ -644,6 +657,36 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
                 ))}
               </select>
             </div>
+          </div>
+
+          {/* Seletor de Agente Copiloto IA */}
+          <div className="bg-background/40 border border-accent-amber/20 rounded-xl p-3.5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <div className="p-2 rounded-lg bg-accent-amber/20 text-accent-amber font-bold text-xs">
+                ✨
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-white leading-tight">
+                  Atribuir Agente Copiloto IA
+                </label>
+                <p className="text-[11px] text-gray-400">
+                  Um mentor ou braço direito para ajudar na produção ou execução desta tarefa.
+                </p>
+              </div>
+            </div>
+
+            <select
+              value={assignedAgentId}
+              onChange={e => setAssignedAgentId(e.target.value)}
+              className="bg-background border border-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-accent-amber min-w-[220px]"
+            >
+              <option value="">Sem copiloto</option>
+              {DEFAULT_AI_AGENTS.map(ag => (
+                <option key={ag.id} value={ag.id}>
+                  {ag.name} ({ag.category})
+                </option>
+              ))}
+            </select>
           </div>
 
           {/* Calibrador de Prioridade Real */}

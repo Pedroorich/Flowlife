@@ -35,6 +35,9 @@ import {
 } from '../lib/notificationEngine';
 import { buildDailyTimeline, DailyTimelineResult, TimeSlot } from '../lib/smartScheduler';
 import { calculateRealPriority } from '../lib/priorityEngine';
+import { AIAgent } from '../types';
+import { DEFAULT_AI_AGENTS, getAgentById } from '../lib/defaultAgents';
+import { TaskCopilotDrawer } from './TaskCopilotDrawer';
 
 interface TodayViewProps {
   profile: UserProfile;
@@ -83,6 +86,32 @@ export function TodayView({
   // Edição de Tarefa
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [editForm, setEditForm] = useState<Partial<Task>>({});
+
+  // Copiloto IA State (Agente Braço Direito)
+  const [copilotTask, setCopilotTask] = useState<Task | null>(null);
+  const [copilotAgent, setCopilotAgent] = useState<AIAgent | null>(null);
+
+  const handleOpenCopilot = (task: Task) => {
+    const agent = getAgentById(task.assignedAgentId) || DEFAULT_AI_AGENTS[0];
+    setCopilotTask(task);
+    setCopilotAgent(agent);
+  };
+
+  const handleUpdateTaskNotes = async (notes: string) => {
+    if (!copilotTask?.id) return;
+    await updateDoc(doc(db, 'tasks', copilotTask.id), { notes });
+    setCopilotTask(prev => prev ? { ...prev, notes } : null);
+  };
+
+  const handleSwitchCopilotAgent = async (newAgentId: string) => {
+    const agent = getAgentById(newAgentId);
+    if (agent && copilotTask) {
+      setCopilotAgent(agent);
+      if (copilotTask.id) {
+        await updateDoc(doc(db, 'tasks', copilotTask.id), { assignedAgentId: newAgentId });
+      }
+    }
+  };
 
   // Recalcular Timeline quando tasks, rotinas ou imprevistos mudarem
   useEffect(() => {
@@ -462,15 +491,34 @@ export function TodayView({
                     <Check className="w-4 h-4" /> Concluir Tarefa
                   </button>
                 </div>
+                {/* Botão Copiloto no Timer Ativo */}
+                <button
+                  onClick={() => handleOpenCopilot(activeTask)}
+                  className="w-full py-2 bg-accent-amber/20 hover:bg-accent-amber/30 border border-accent-amber/40 text-accent-amber rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  {activeTask.assignedAgentId 
+                    ? `Copiloto: ${getAgentById(activeTask.assignedAgentId)?.name}` 
+                    : "Acionar Copiloto IA nesta Tarefa"}
+                </button>
               </div>
             ) : timeline.nextAction ? (
-              <button 
-                onClick={() => handleStartTask(timeline.nextAction!.task)}
-                className="px-8 py-4 bg-accent-amber text-background font-bold text-base rounded-xl hover:bg-amber-400 hover:scale-105 transition-all flex items-center gap-3 shadow-[0_0_20px_rgba(245,158,11,0.25)]"
-              >
-                <PlayCircle className="w-6 h-6" />
-                Iniciar no Modo Foco
-              </button>
+              <div className="flex flex-col md:flex-row items-center gap-2">
+                <button 
+                  onClick={() => handleStartTask(timeline.nextAction!.task)}
+                  className="px-8 py-4 bg-accent-amber text-background font-bold text-base rounded-xl hover:bg-amber-400 hover:scale-105 transition-all flex items-center gap-3 shadow-[0_0_20px_rgba(245,158,11,0.25)]"
+                >
+                  <PlayCircle className="w-6 h-6" />
+                  Iniciar no Modo Foco
+                </button>
+                <button
+                  onClick={() => handleOpenCopilot(timeline.nextAction!.task)}
+                  className="p-4 bg-surface border border-border hover:border-accent-amber text-gray-300 hover:text-accent-amber rounded-xl transition-all"
+                  title="Abrir Copiloto IA para planejar a tarefa"
+                >
+                  <Sparkles className="w-6 h-6" />
+                </button>
+              </div>
             ) : null}
           </div>
         </div>
@@ -638,6 +686,17 @@ export function TodayView({
                       <h4 className={cn("text-base font-medium text-white", slot.isCompleted && "line-through text-gray-400")}>
                         {slot.title}
                       </h4>
+                      {slot.task?.assignedAgentId && (
+                        <div className="mt-1">
+                          <button
+                            onClick={() => handleOpenCopilot(slot.task!)}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-accent-amber/15 text-accent-amber border border-accent-amber/30 hover:bg-accent-amber/25 transition-all"
+                          >
+                            <Sparkles className="w-3 h-3 text-accent-amber" />
+                            {getAgentById(slot.task.assignedAgentId)?.name || 'Agente Copiloto'}
+                          </button>
+                        </div>
+                      )}
                       {slot.explanation && (
                         <p className="text-xs text-gray-400 mt-1">{slot.explanation}</p>
                       )}
@@ -651,6 +710,20 @@ export function TodayView({
 
                       {slot.task && !slot.isCompleted && (
                         <div className="flex items-center gap-2">
+                          {/* Botão Copiloto IA */}
+                          <button
+                            onClick={() => handleOpenCopilot(slot.task!)}
+                            className={cn(
+                              "apple-press p-2.5 rounded-xl border transition-all flex items-center justify-center",
+                              slot.task.assignedAgentId 
+                                ? "bg-accent-amber/20 border-accent-amber text-accent-amber hover:bg-accent-amber/30 shadow-sm" 
+                                : "bg-white/5 border-white/10 text-gray-400 hover:text-accent-amber hover:border-accent-amber/30"
+                            )}
+                            title={slot.task.assignedAgentId ? `Abrir ${getAgentById(slot.task.assignedAgentId)?.name}` : "Acionar Copiloto de IA"}
+                          >
+                            <Sparkles className="w-4 h-4" />
+                          </button>
+
                           {!isRunning ? (
                             <button 
                               onClick={() => handleStartTask(slot.task!)}
@@ -867,6 +940,19 @@ export function TodayView({
             </form>
           </div>
         </div>
+      )}
+
+      {/* 9. Drawer do Copiloto de IA */}
+      {copilotTask && copilotAgent && (
+        <TaskCopilotDrawer
+          task={copilotTask}
+          agent={copilotAgent}
+          isOpen={!!copilotTask}
+          onClose={() => setCopilotTask(null)}
+          onUpdateTaskNotes={handleUpdateTaskNotes}
+          availableAgents={DEFAULT_AI_AGENTS}
+          onSwitchAgent={handleSwitchCopilotAgent}
+        />
       )}
     </div>
   );

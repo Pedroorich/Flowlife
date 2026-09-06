@@ -15,7 +15,9 @@ import {
   FolderKanban, 
   Flame, 
   Settings,
-  CalendarDays
+  CalendarDays,
+  Bot,
+  Sparkles
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import { InboxView } from './components/InboxView';
@@ -27,8 +29,9 @@ import { MonthlyView } from './components/MonthlyView';
 import { DashboardView } from './components/DashboardView';
 import { NotificationsView } from './components/NotificationsView';
 import { SettingsView } from './components/SettingsView';
+import { AgentsView } from './components/AgentsView';
 
-type Tab = 'today' | 'weekly' | 'projects' | 'routines' | 'inbox' | 'dashboard' | 'monthly' | 'notifications' | 'settings';
+type Tab = 'today' | 'weekly' | 'projects' | 'agents' | 'routines' | 'inbox' | 'dashboard' | 'monthly' | 'notifications' | 'settings';
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -39,6 +42,7 @@ export default function App() {
   const [unforeseenEvents, setUnforeseenEvents] = useState<UnforeseenEvent[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [routines, setRoutines] = useState<RoutineBlock[]>([]);
+  const [customAgents, setCustomAgents] = useState<any[]>([]);
 
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged(async (user) => {
@@ -90,11 +94,19 @@ export default function App() {
       setRoutines(routinesData);
     });
 
+    // Custom Agents listener
+    const qAgents = query(collection(db, 'ai_agents'), where('userId', '==', user.uid));
+    const unsubAgents = onSnapshot(qAgents, (snapshot) => {
+      const agentsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setCustomAgents(agentsData);
+    });
+
     return () => {
       unsubTasks();
       unsubEvents();
       unsubProjects();
       unsubRoutines();
+      unsubAgents();
     };
   }, [user, profile]);
 
@@ -169,6 +181,7 @@ export default function App() {
     { id: 'today', icon: CheckSquare, label: 'Hoje' },
     { id: 'weekly', icon: Calendar, label: 'Semana' },
     { id: 'projects', icon: FolderKanban, label: 'Projetos' },
+    { id: 'agents', icon: Bot, label: 'Agentes' },
     { id: 'routines', icon: Flame, label: 'Rotinas' },
     { id: 'inbox', icon: Inbox, label: 'Backlog' },
     { id: 'dashboard', icon: LayoutDashboard, label: 'Equilíbrio' },
@@ -240,6 +253,19 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2">
               <button 
+                onClick={() => setActiveTab('agents')}
+                className={cn(
+                  "p-2 rounded-xl transition-all flex items-center gap-1",
+                  activeTab === 'agents' 
+                    ? "bg-purple-500 text-white font-bold shadow-md" 
+                    : "text-purple-400 bg-purple-500/10 border border-purple-500/20"
+                )}
+                title="Agentes de IA"
+              >
+                <Bot className="w-4 h-4" />
+                <span className="text-[11px] font-bold">Agentes</span>
+              </button>
+              <button 
                 onClick={() => setActiveTab('notifications')}
                 className={cn(
                   "p-2 rounded-xl transition-all flex items-center gap-1",
@@ -309,6 +335,13 @@ export default function App() {
                 profile={profile} 
                 tasks={tasks} 
                 unforeseenEvents={unforeseenEvents} 
+              />
+            )}
+            {activeTab === 'agents' && (
+              <AgentsView 
+                profile={profile} 
+                tasks={tasks} 
+                customAgents={customAgents}
               />
             )}
             {activeTab === 'notifications' && (

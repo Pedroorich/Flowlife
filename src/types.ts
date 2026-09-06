@@ -88,6 +88,7 @@ export interface Task {
   energyLevel?: EnergyLevel;
   
   notes?: string;
+  assignedAgentId?: string; // ID do Agente de IA copiloto atribuído à tarefa
   status: TaskStatus; // "pending" | "completed"
   executionStatus?: ExecutionStatus;
   parentTaskId?: string;
@@ -140,5 +141,23 @@ export interface UserProfile {
     notifiedEnd?: boolean;
     overtimeAlertShown?: boolean;
   };
+}
+
+// Agente de IA Especialista (Braço Direito / Copiloto)
+export type AIAgentCategory = "Conteúdo" | "Estudos" | "Negócios" | "Saúde" | "Geral";
+
+export interface AIAgent {
+  id: string;
+  name: string; // ex: "Copywriter de Reels & Instagram"
+  role: string; // ex: "Especialista em Roteiros e Retenção"
+  description: string;
+  systemPrompt: string;
+  suggestedPrompts: string[]; // Botões rápidos de 1 toque (ex: "Gerar 3 ganchos para vídeo")
+  category: AIAgentCategory;
+  avatarIcon: "Video" | "GraduationCap" | "TrendingUp" | "Dumbbell" | "PenTool" | "Bot" | "Sparkles";
+  color?: string; // Cor de destaque do agente (âmbar, esmeralda, roxo, etc.)
+  isDefault?: boolean;
+  userId?: string; // Se for criado pelo próprio usuário
+  createdAt?: string;
 }
 
