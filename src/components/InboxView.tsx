@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Task, TaskType, LifeArea, Priority, UserProfile, Project } from '../types';
+import { Task, TaskType, LifeArea, Priority, UserProfile, Project, RoutineBlock } from '../types';
 import { db } from '../firebase';
 import { collection, addDoc, writeBatch, doc, deleteDoc, updateDoc, query, where, getDocs } from 'firebase/firestore';
 import { 
@@ -20,7 +20,11 @@ import {
   Radio,
   Key,
   ExternalLink,
-  CheckCircle2
+  CheckCircle2,
+  Dumbbell,
+  Repeat,
+  Layers,
+  ArrowRight
 } from 'lucide-react';
 import { getGeminiApiKey, saveGeminiApiKey, testGeminiApiKey, callGemini, formatGeminiErrorMessage } from '../lib/gemini';
 import { format } from 'date-fns';
@@ -31,13 +35,66 @@ import { ChatMessageFormatter } from './ChatMessageFormatter';
 const TASK_TYPES: TaskType[] = ["Projeto", "Tarefa", "Compromisso", "Entrega", "Reunião", "Meta", "Hábito", "Outro"];
 const PRIORITIES: Priority[] = ["Alta", "Média", "Baixa"];
 
+export interface RoutineItemProposal {
+  title: string;
+  area?: LifeArea;
+  startTime: string;
+  endTime: string;
+  daysOfWeek: number[];
+  transitMinutesBefore?: number;
+  transitMinutesAfter?: number;
+  isFixed?: boolean;
+}
+
+export interface ProjectItemProposal {
+  name: string;
+  area?: LifeArea;
+  description?: string;
+  color?: string;
+}
+
+export interface TaskItemProposal {
+  title: string;
+  type?: TaskType;
+  area?: LifeArea;
+  projectName?: string;
+  priority?: Priority;
+  urgency?: number;
+  impact?: number;
+  timeEstimate?: number;
+  timeMax?: number;
+  scheduledStartTime?: string;
+  isFixed?: boolean;
+  assignedAgentId?: string;
+  notes?: string;
+}
+
+export interface ProfileUpdateProposal {
+  workStartTime?: string;
+  workEndTime?: string;
+  wakeTime?: string;
+  bedTime?: string;
+}
+
+export interface SystemModificationPlan {
+  action?: 'apply_changes' | 'create_tasks' | 'reply';
+  message?: string;
+  autoApply?: boolean;
+  routines?: RoutineItemProposal[];
+  projects?: ProjectItemProposal[];
+  tasks?: TaskItemProposal[];
+  profileUpdates?: ProfileUpdateProposal;
+}
+
 interface InboxViewProps {
   profile: UserProfile;
   projects?: Project[];
   tasks?: Task[];
+  routines?: RoutineBlock[];
+  onNavigateTab?: (tab: string) => void;
 }
 
-export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps) {
+export function InboxView({ profile, projects = [], tasks = [], routines = [], onNavigateTab }: InboxViewProps) {
   const [mode, setMode] = useState<'ai' | 'quick' | 'manual'>('quick');
   
   // Quick Capture State
@@ -68,6 +125,14 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [proposedTasks, setProposedTasks] = useState<Partial<Task>[] | null>(null);
+  const [proposedPlan, setProposedPlan] = useState<SystemModificationPlan | null>(null);
+  const [appliedSummary, setAppliedSummary] = useState<{
+    routinesCount: number;
+    projectsCount: number;
+    tasksCount: number;
+    profileUpdated: boolean;
+    timestamp: string;
+  } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Voice Input State (Speech-to-Text)
@@ -199,7 +264,7 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, proposedTasks]);
+  }, [messages, proposedTasks, proposedPlan, appliedSummary]);
 
   // Captura Rápida Inteligente
   const handleQuickCapture = async (e: React.FormEvent) => {
@@ -286,6 +351,177 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
     }
   };
 
+  const DAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+  const formatDaysDisplay = (days?: number[]) => {
+    if (!days || days.length === 0) return 'Todos os dias';
+    if (days.length === 7) return 'Todos os dias';
+    if (days.length === 5 && [1, 2, 3, 4, 5].every(d => days.includes(d))) return 'Seg a Sex';
+    if (days.length === 2 && days.includes(0) && days.includes(6)) return 'Fim de semana';
+    return days.map(d => DAY_LABELS[d] ?? d).join(', ');
+  };
+
+  const handleApplyChanges = async (planToApply?: SystemModificationPlan | null) => {
+    const plan = planToApply || proposedPlan;
+    if (!plan && !proposedTasks) return;
+
+    setLoading(true);
+    try {
+      let createdRoutinesCount = 0;
+      let createdProjectsCount = 0;
+      let createdTasksCount = 0;
+      let profileUpdated = false;
+
+      // 1. Criar Projetos necessários
+      const projectMap = new Map<string, string>();
+      projects.forEach(p => {
+        if (p.id && p.name) {
+          projectMap.set(p.name.toLowerCase().trim(), p.id);
+        }
+      });
+
+      if (plan?.projects && plan.projects.length > 0) {
+        for (const proj of plan.projects) {
+          if (!proj.name || !proj.name.trim()) continue;
+          const cleanName = proj.name.trim();
+          const lowerName = cleanName.toLowerCase();
+
+          if (!projectMap.has(lowerName)) {
+            const docRef = await addDoc(collection(db, 'projects'), {
+              userId: profile.uid,
+              name: cleanName,
+              description: proj.description || '',
+              area: proj.area || 'Trabalho',
+              color: proj.color || '#F59E0B',
+              status: 'active',
+              createdAt: new Date().toISOString()
+            });
+            projectMap.set(lowerName, docRef.id);
+            createdProjectsCount++;
+          }
+        }
+      }
+
+      // 2. Criar Rotinas Recorrentes (Musculação, Jiu-Jitsu, Teatro, Leitura, etc.)
+      if (plan?.routines && plan.routines.length > 0) {
+        for (const r of plan.routines) {
+          if (!r.title || !r.startTime || !r.endTime) continue;
+          const cleanTitle = r.title.trim();
+          const days = (r.daysOfWeek && r.daysOfWeek.length > 0) ? r.daysOfWeek : [1, 2, 3, 4, 5];
+
+          const alreadyExists = routines.some(existing => 
+            existing.title.toLowerCase().trim() === cleanTitle.toLowerCase() &&
+            existing.startTime === r.startTime
+          );
+
+          if (!alreadyExists) {
+            await addDoc(collection(db, 'routines'), {
+              userId: profile.uid,
+              title: cleanTitle,
+              area: r.area || 'Saúde & Treino',
+              startTime: r.startTime,
+              endTime: r.endTime,
+              transitMinutesBefore: Number(r.transitMinutesBefore) || 0,
+              transitMinutesAfter: Number(r.transitMinutesAfter) || 0,
+              daysOfWeek: days,
+              isFixed: r.isFixed ?? true,
+              createdAt: new Date().toISOString()
+            });
+            createdRoutinesCount++;
+          }
+        }
+      }
+
+      // 3. Criar Tarefas Fracionadas
+      const tasksToCreate = plan?.tasks || proposedTasks || [];
+      if (tasksToCreate.length > 0) {
+        const batch = writeBatch(db);
+        const todayKey = format(new Date(), 'yyyy-MM-dd');
+
+        for (const pt of tasksToCreate) {
+          if (!pt.title || !pt.title.trim()) continue;
+
+          let matchedProjectId: string | undefined = undefined;
+          const pName = (pt as any).projectName;
+          if (pName) {
+            matchedProjectId = projectMap.get(pName.toLowerCase().trim());
+          }
+
+          const docRef = doc(collection(db, 'tasks'));
+          const newTask: Omit<Task, 'id'> = {
+            title: pt.title.trim(),
+            type: (pt.type as TaskType) || 'Tarefa',
+            area: (pt.area as LifeArea) || profile.activeAreas[0] || 'Trabalho',
+            projectId: matchedProjectId,
+            priority: (pt.priority as Priority) || 'Média',
+            urgency: pt.urgency || 3,
+            impact: pt.impact || 3,
+            timeEstimate: pt.timeEstimate || 45,
+            timeMax: pt.timeMax || Math.round((pt.timeEstimate || 45) * 1.5),
+            scheduledStartTime: pt.scheduledStartTime || undefined,
+            isFixed: pt.isFixed ?? (pt.type === 'Compromisso' || pt.type === 'Reunião'),
+            assignedAgentId: pt.assignedAgentId || undefined,
+            dateAllocated: pt.scheduledStartTime ? todayKey : undefined,
+            notes: (pt as any).notes || '',
+            status: 'pending',
+            userId: profile.uid,
+            createdAt: new Date().toISOString()
+          };
+          batch.set(docRef, newTask);
+          createdTasksCount++;
+        }
+
+        if (createdTasksCount > 0) {
+          await batch.commit();
+        }
+      }
+
+      // 4. Atualizar Limites do Perfil se enviados
+      if (plan?.profileUpdates && Object.keys(plan.profileUpdates).length > 0) {
+        const updates: any = {};
+        if (plan.profileUpdates.workStartTime) updates.workStartTime = plan.profileUpdates.workStartTime;
+        if (plan.profileUpdates.workEndTime) updates.workEndTime = plan.profileUpdates.workEndTime;
+        if (plan.profileUpdates.wakeTime) updates.wakeTime = plan.profileUpdates.wakeTime;
+        if (plan.profileUpdates.bedTime) updates.bedTime = plan.profileUpdates.bedTime;
+
+        if (Object.keys(updates).length > 0) {
+          await updateDoc(doc(db, 'users', profile.uid), updates);
+          profileUpdated = true;
+        }
+      }
+
+      setProposedPlan(null);
+      setProposedTasks(null);
+
+      setAppliedSummary({
+        routinesCount: createdRoutinesCount,
+        projectsCount: createdProjectsCount,
+        tasksCount: createdTasksCount,
+        profileUpdated,
+        timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      });
+
+      const summaryParts: string[] = [];
+      if (createdRoutinesCount > 0) summaryParts.push(`• **${createdRoutinesCount} Rotina(s) Recorrente(s)** cadastradas (Musculação, Jiu-Jitsu, Teatro, Hábitos)`);
+      if (createdProjectsCount > 0) summaryParts.push(`• **${createdProjectsCount} Projeto(s)** novo(s) inicializado(s) no sistema`);
+      if (createdTasksCount > 0) summaryParts.push(`• **${createdTasksCount} Tarefa(s)** agendadas e fracionadas`);
+      if (profileUpdated) summaryParts.push(`• **Limites do Perfil** sincronizados (horário de corte e rotina)`);
+
+      const feedbackMsg = `⚡ **Toda a rotina combinada foi adicionada diretamente no sistema!**\n\n${summaryParts.length > 0 ? summaryParts.join('\n') : 'Estrutura configurada e ativa no FlowLife.'}\n\nVocê já pode conferir tudo na Agenda de Hoje, nas Rotinas Semanais ou nos Projetos!`;
+
+      setMessages(prev => [...prev, { role: 'ai', text: feedbackMsg }]);
+
+    } catch (error: any) {
+      console.error("Erro ao aplicar modificações do sistema", error);
+      setMessages(prev => [...prev, { role: 'ai', text: `⚠️ Erro ao salvar estrutura no sistema: ${error?.message || 'Falha na gravação'}` }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const confirmAITasks = async () => {
+    await handleApplyChanges();
+  };
+
   const handleSendAI = async () => {
     if (isRecordingAI) {
       stopVoiceInput();
@@ -310,61 +546,115 @@ export function InboxView({ profile, projects = [], tasks = [] }: InboxViewProps
     setVoiceError(null);
 
     try {
-      const systemPrompt = `Você é o assistente executivo e estrategista de IA do FlowLife.
-O usuário é o Pedro (trabalha com marketing digital, ofertas validadas, tráfego orgânico, projetos paralelos, treinos de musculação, Jiu-Jitsu e igreja).
-O usuário pode tanto digitar quanto FALAR livremente por voz sobre a rotina que ele vai ter, tarefas do dia, compromissos ou projetos complexos (ex: "amanhã preciso acordar às 7h, treinar Jiu-jitsu às 9h, depois gravar criativos da oferta A, almoçar às 12h30, reunião com cliente às 14h e encerrar às 19h").
+      const routinesContext = routines.length > 0 
+        ? routines.map(r => `- ${r.title} (${r.startTime}-${r.endTime}, Dias: [${r.daysOfWeek?.join(',') || ''}])`).join('\n')
+        : 'Nenhuma rotina cadastrada ainda.';
 
-Seu papel é:
-1. Analisar a fala ou texto do usuário.
-2. Identificar tanto tarefas executáveis quanto blocos de rotina/compromissos fixos (treinos, reuniões, almoço, culto).
-3. Respeitar o horário inegociável de encerramento do expediente das ${profile.workEndTime || '19:00'}.
-4. Fracionar projetos em blocos práticos de 30 a 90 minutos com limite de tempo máximo contra overthinking.
+      const projectsContext = projects.length > 0
+        ? projects.map(p => `- ${p.name} (Área: ${p.area})`).join('\n')
+        : 'Nenhum projeto cadastrado ainda.';
 
-RESPONDA SEMPRE EM JSON no seguinte formato:
-Se precisar perguntar algo ou esclarecer uma dúvida:
+      const systemPrompt = `Você é o assistente executivo e gerenciador central de sistema do FlowLife.
+O usuário é o Pedro (trabalha com marketing digital, ofertas validadas, tráfego orgânico, projetos paralelos, musculação, Jiu-Jitsu, teatro, leitura e igreja).
+
+Você tem AUTORIDADE TOTAL para configurar e alterar a estrutura completa do app a partir da conversa com o usuário.
+O usuário pode tanto falar pelo microfone quanto digitar livremente.
+
+ESTRUTURA ATUAL DO SISTEMA DO USUÁRIO:
+- Horários de Perfil: Acordar: ${profile.wakeTime || '07:00'} | Dormir: ${profile.bedTime || '23:00'} | Início: ${profile.workStartTime || '08:30'} | Corte Inegociável: ${profile.workEndTime || '19:00'}
+- Áreas Ativas: ${profile.activeAreas.join(', ')}
+- Rotinas já cadastradas:
+${routinesContext}
+- Projetos já cadastrados:
+${projectsContext}
+
+SUAS CAPACIDADES NO SISTEMA:
+1. 'routines': Blocos semanais recorrentes inegociáveis.
+   - title: nome do hábito ou compromisso (ex: "Musculação", "Jiu-Jitsu", "Aula de Teatro", "Leitura Matinal", "Almoço", "Igreja")
+   - area: área da vida ("Saúde & Treino", "Descanso & Pessoal", "Estudos", "Trabalho", etc.)
+   - startTime e endTime: formato "HH:mm" (ex: "18:00", "19:00")
+   - daysOfWeek: array de números (0=Dom, 1=Seg, 2=Ter, 3=Qua, 4=Qui, 5=Sex, 6=Sáb)
+   - transitMinutesBefore / transitMinutesAfter: minutos de deslocamento (ex: 15 ou 30)
+   - isFixed: true
+
+2. 'projects': Entidades de projetos e ofertas.
+   - name: nome claro (ex: "Site do Tio", "Criativos Instagram", "Oferta Validada")
+   - area: área correspondente
+   - description: resumo do projeto
+   - color: cor hex (ex: "#10B981", "#8B5CF6", "#F59E0B")
+
+3. 'tasks': Tarefas e metas práticas fracionadas em blocos de 30 a 90 minutos para evitar overthinking.
+   - title: título claro da ação
+   - type: "Projeto" | "Tarefa" | "Compromisso" | "Entrega" | "Reunião" | "Meta" | "Hábito" | "Outro"
+   - area: área da tarefa
+   - projectName: vincular ao nome de um projeto
+   - priority: "Alta" | "Média" | "Baixa"
+   - urgency e impact: números de 1 a 5
+   - timeEstimate (ex: 45) e timeMax (ex: 75)
+   - scheduledStartTime: horário sugerido (ex: "09:00")
+   - assignedAgentId: agente copiloto ("agent-instagram-creator", "agent-study-tutor", "agent-marketing-strategist", "agent-fitness-coach", "agent-executive-writer")
+
+4. 'profileUpdates': Atualização de limites de expediente e sono (wakeTime, bedTime, workStartTime, workEndTime).
+
+COMO RESPONDER:
+SEMPRE RESPONDA EM JSON no seguinte formato:
+
+1. Se o usuário estiver apenas conversando, perguntando ou alinhando ideias:
 {
   "action": "reply",
-  "message": "Sua resposta formatada em parágrafos aqui..."
+  "message": "Sua resposta estruturada em parágrafos aqui..."
 }
 
-REGRAS OBRIGATÓRIAS DE FORMATAÇÃO DO CAMPO 'message':
-1. NUNCA envie texto corrido em um único bloco.
-2. Divida SEMPRE sua resposta em parágrafos curtos e respirados usando quebras duplas de linha (\\n\\n).
-3. Destaque termos-chave, horários e prioridades com **negrito**.
-4. Use tópicos com marcadores (• ou -) para perguntas, opções ou etapas.
-5. Seja direto, prático e visualmente agradável de ler.
-
-Se tiver informações suficientes para criar as tarefas/rotinas na agenda:
+2. Se você propôs uma rotina/estrutura, OU se o usuário disse para adicionar/salvar/montar/aplicar direto no sistema:
 {
-  "action": "create_tasks",
-  "message": "Entendi perfeitamente sua rotina e tarefas! Aqui está o plano estratégico fracionado:",
+  "action": "apply_changes",
+  "autoApply": true,
+  "message": "Explicação detalhada e organizada em parágrafos do que foi estruturado...",
+  "routines": [
+    {
+      "title": "Musculação",
+      "area": "Saúde & Treino",
+      "startTime": "18:00",
+      "endTime": "19:00",
+      "daysOfWeek": [1, 2, 3, 4, 5],
+      "isFixed": true
+    }
+  ],
+  "projects": [
+    {
+      "name": "Site do Tio",
+      "area": "Trabalho",
+      "description": "Desenvolvimento do site",
+      "color": "#10B981"
+    }
+  ],
   "tasks": [
     {
-      "title": "Nome claro da tarefa ou compromisso",
+      "title": "Rascunho da estrutura do site do tio",
       "type": "Tarefa",
       "area": "Trabalho",
+      "projectName": "Site do Tio",
       "priority": "Alta",
       "urgency": 4,
       "impact": 5,
       "timeEstimate": 45,
       "timeMax": 75,
       "scheduledStartTime": "09:00",
-      "isFixed": false,
-      "assignedAgentId": "agent-instagram-creator"
+      "assignedAgentId": "agent-executive-writer"
     }
-  ]
+  ],
+  "profileUpdates": {
+    "wakeTime": "07:00",
+    "workEndTime": "19:00"
+  }
 }
 
-Agentes Copilotos disponíveis para o campo 'assignedAgentId' (se aplicável):
-- "agent-instagram-creator" (para Reels, gravação de vídeos, posts, Instagram, criativos)
-- "agent-study-tutor" (para tarefas de estudo, aprendizado, leitura, provas, resumos)
-- "agent-marketing-strategist" (para ofertas, tráfego, vendas, páginas, copywriting)
-- "agent-fitness-coach" (para treinos, musculação, Jiu-Jitsu)
-- "agent-executive-writer" (para e-mails, propostas, alinhamentos executivos)
-
-Tipos válidos: "Projeto", "Tarefa", "Compromisso", "Entrega", "Reunião", "Meta", "Hábito", "Outro".
-Áreas ativas válidas: ${profile.activeAreas.join(', ')}.
-Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
+REGRAS OBRIGATÓRIAS:
+1. Se o usuário pedir para adicionar/salvar/montar/aplicar tudo o que foi conversado ("adicione toda a rotina que conversamos direto no sistema", "salve", "monte", etc.), NÃO RESPONDA APENAS TEXTO! Você DEVE gerar o JSON 'apply_changes' contendo TODAS as rotinas recorrentes, projetos e tarefas combinados no histórico da conversa, com 'autoApply': true.
+2. Divida SEMPRE sua resposta em parágrafos curtos usando quebras duplas de linha (\\n\\n).
+3. Destaque termos-chave, horários e prioridades com **negrito**.
+4. Use tópicos com marcadores (• ou -) para opções ou etapas.
+5. NUNCA envie texto corrido em um único bloco.`;
 
       const chatHistory = messages.map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.text}`).join('\n');
       const prompt = `Histórico:\n${chatHistory}\nUser: ${textToSend}\nAI:`;
@@ -376,18 +666,39 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
       });
 
       let text = (rawResponse || '').trim();
-      text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+      text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+      // Extrai JSON mesmo se a IA colocar texto ao redor
+      let jsonCandidate = text;
+      const jsonStart = text.indexOf('{');
+      const jsonEnd = text.lastIndexOf('}');
+      if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+        jsonCandidate = text.substring(jsonStart, jsonEnd + 1);
+      }
       
       try {
-        const data = JSON.parse(text);
-        if (data.action === 'reply' && data.message) {
-          setMessages(prev => [...prev, { role: 'ai', text: data.message }]);
+        const data: SystemModificationPlan = JSON.parse(jsonCandidate);
+        const hasRoutines = Array.isArray(data.routines) && data.routines.length > 0;
+        const hasProjects = Array.isArray(data.projects) && data.projects.length > 0;
+        const hasTasks = Array.isArray(data.tasks) && data.tasks.length > 0;
+        const hasProfile = Boolean(data.profileUpdates && Object.keys(data.profileUpdates).length > 0);
+        const hasStructuredChanges = hasRoutines || hasProjects || hasTasks || hasProfile;
+
+        const isUserAskingToApply = /\b(adicione|adicionar|coloque|colocar|salve|salvar|monte|montar|aplique|aplicar|insira|inserir|grave|gravar|configure|configurar|cadastre|cadastrar|integre|integrar)\b/i.test(textToSend);
+
+        if (data.message) {
+          setMessages(prev => [...prev, { role: 'ai', text: data.message! }]);
+        }
+
+        if (hasStructuredChanges) {
+          if (data.autoApply || isUserAskingToApply) {
+            await handleApplyChanges(data);
+          } else {
+            setProposedPlan(data);
+          }
         } else if (data.action === 'create_tasks' && data.tasks) {
-          setMessages(prev => [...prev, { role: 'ai', text: data.message || "Entendi sua rotina! Aqui está a sugestão fracionada:" }]);
-          setProposedTasks(data.tasks);
-        } else if (data.message) {
-          setMessages(prev => [...prev, { role: 'ai', text: data.message }]);
-        } else {
+          setProposedTasks(data.tasks as any);
+        } else if (!data.message) {
           setMessages(prev => [...prev, { role: 'ai', text: rawResponse }]);
         }
       } catch {
@@ -400,45 +711,6 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
       setMessages(prev => [...prev, { role: 'ai', text: `⚠️ ${errMsg}` }]);
     } finally {
       setIsTyping(false);
-    }
-  };
-
-  const confirmAITasks = async () => {
-    if (!proposedTasks) return;
-    setLoading(true);
-    try {
-      const batch = writeBatch(db);
-      const todayKey = format(new Date(), 'yyyy-MM-dd');
-      
-      proposedTasks.forEach(pt => {
-        const docRef = doc(collection(db, 'tasks'));
-        const newTask: Omit<Task, 'id'> = {
-          title: pt.title || 'Tarefa sem nome',
-          type: (pt.type as TaskType) || 'Tarefa',
-          area: (pt.area as LifeArea) || profile.activeAreas[0] || 'Trabalho',
-          priority: (pt.priority as Priority) || 'Média',
-          urgency: pt.urgency || 3,
-          impact: pt.impact || 3,
-          timeEstimate: pt.timeEstimate || 45,
-          timeMax: pt.timeMax || Math.round((pt.timeEstimate || 45) * 1.5),
-          scheduledStartTime: pt.scheduledStartTime || undefined,
-          isFixed: pt.isFixed ?? (pt.type === 'Compromisso' || pt.type === 'Reunião'),
-          assignedAgentId: pt.assignedAgentId || undefined,
-          dateAllocated: pt.scheduledStartTime ? todayKey : undefined,
-          status: 'pending',
-          userId: profile.uid,
-          createdAt: new Date().toISOString()
-        };
-        batch.set(docRef, newTask);
-      });
-
-      await batch.commit();
-      setProposedTasks(null);
-      setMessages(prev => [...prev, { role: 'ai', text: "✅ Tarefas e rotinas salvas com sucesso! O FlowLife já sincronizou sua agenda e ativou os lembretes." }]);
-    } catch (error) {
-      console.error("Error saving AI tasks", error);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -659,8 +931,198 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
               </div>
             )}
 
-            {/* Proposta de Tarefas da IA */}
-            {proposedTasks && (
+            {/* Card de Estrutura do Sistema Proposta pela IA */}
+            {proposedPlan && (
+              <div className="bg-background border-2 border-accent-amber/50 rounded-2xl p-4 space-y-3.5 shadow-xl animate-in fade-in-50 duration-200">
+                <div className="flex items-center justify-between border-b border-border/60 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-accent-amber animate-pulse" />
+                    <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                      Estrutura do Sistema Pronta para Aplicação
+                    </h4>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 bg-accent-amber/20 text-accent-amber rounded-full font-mono font-bold">
+                    {(proposedPlan.routines?.length || 0) + (proposedPlan.projects?.length || 0) + (proposedPlan.tasks?.length || 0)} itens
+                  </span>
+                </div>
+
+                {/* Rotinas Recorrentes Propostas */}
+                {proposedPlan.routines && proposedPlan.routines.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-semibold text-accent-amber flex items-center gap-1.5">
+                      <Repeat className="w-3.5 h-3.5" /> Rotinas Recorrentes Semanais ({proposedPlan.routines.length}):
+                    </div>
+                    <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                      {proposedPlan.routines.map((r, idx) => (
+                        <div key={idx} className="flex justify-between items-center text-xs bg-white/5 hover:bg-white/10 px-3 py-2 rounded-xl border border-white/5 transition-colors">
+                          <div className="flex items-center gap-2 truncate pr-2">
+                            <span className="text-[10px] px-2 py-0.5 bg-accent-amber/20 text-accent-amber rounded-md font-mono font-bold shrink-0">
+                              {r.startTime} - {r.endTime}
+                            </span>
+                            <span className="font-medium text-white truncate">{r.title}</span>
+                          </div>
+                          <span className="text-[10px] text-gray-400 bg-surface px-2 py-0.5 rounded border border-border shrink-0">
+                            {formatDaysDisplay(r.daysOfWeek)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Projetos Propostos */}
+                {proposedPlan.projects && proposedPlan.projects.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5" /> Projetos / Ofertas a Criar ({proposedPlan.projects.length}):
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                      {proposedPlan.projects.map((proj, idx) => (
+                        <div key={idx} className="flex items-center justify-between text-xs bg-emerald-500/10 border border-emerald-500/20 px-3 py-2 rounded-xl">
+                          <div className="flex items-center gap-2 truncate">
+                            <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: proj.color || '#10B981' }} />
+                            <span className="font-medium text-emerald-200 truncate">{proj.name}</span>
+                          </div>
+                          <span className="text-[9px] text-emerald-400/80 uppercase font-mono">{proj.area || 'Trabalho'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Tarefas Fracionadas Propostas */}
+                {proposedPlan.tasks && proposedPlan.tasks.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-semibold text-blue-400 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5" /> Tarefas Fracionadas ({proposedPlan.tasks.length}):
+                    </div>
+                    <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                      {proposedPlan.tasks.map((pt, idx) => (
+                        <div key={idx} className="flex justify-between items-center text-xs bg-white/5 px-3 py-2 rounded-xl border border-white/5">
+                          <div className="flex items-center gap-2 truncate pr-2">
+                            {pt.scheduledStartTime && (
+                              <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded font-mono font-bold shrink-0">
+                                {pt.scheduledStartTime}
+                              </span>
+                            )}
+                            <span className="font-medium text-white truncate">{pt.title}</span>
+                          </div>
+                          <span className="font-mono text-gray-400 shrink-0 text-[11px]">{pt.timeEstimate || 45}m</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Limites de Perfil Propostos */}
+                {proposedPlan.profileUpdates && Object.keys(proposedPlan.profileUpdates).length > 0 && (
+                  <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-[11px] text-amber-200 flex flex-wrap items-center gap-3">
+                    <span className="font-bold">Ajuste de Limites:</span>
+                    {proposedPlan.profileUpdates.wakeTime && <span>Acordar: <strong>{proposedPlan.profileUpdates.wakeTime}</strong></span>}
+                    {proposedPlan.profileUpdates.workEndTime && <span>Corte do Trabalho: <strong>{proposedPlan.profileUpdates.workEndTime}</strong></span>}
+                    {proposedPlan.profileUpdates.bedTime && <span>Dormir: <strong>{proposedPlan.profileUpdates.bedTime}</strong></span>}
+                  </div>
+                )}
+
+                {/* Botões de Ação */}
+                <div className="flex gap-2 pt-1">
+                  <button 
+                    onClick={() => handleApplyChanges(proposedPlan)}
+                    disabled={loading}
+                    className="flex-1 py-2.5 bg-accent-emerald text-background font-bold rounded-xl text-xs hover:bg-emerald-400 transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 active:scale-[0.99]"
+                  >
+                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4 fill-current" />}
+                    ⚡ Aplicar Toda Essa Estrutura no Sistema com 1 Clique
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setProposedPlan(null)}
+                    disabled={loading}
+                    className="px-3.5 py-2.5 bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white rounded-xl text-xs font-semibold transition-colors"
+                  >
+                    Descartar
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Card de Confirmação & Navegação Rápida Pós-Aplicação */}
+            {appliedSummary && (
+              <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-2xl p-4 space-y-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                      <CheckCircle2 className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-white">
+                        Estrutura Sincronizada no Sistema com Sucesso!
+                      </h4>
+                      <p className="text-[11px] text-emerald-300/80">
+                        Aplicado às {appliedSummary.timestamp}. O FlowLife já sincronizou sua agenda e rotina.
+                      </p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setAppliedSummary(null)} 
+                    className="text-gray-400 hover:text-white text-xs p-1"
+                    title="Fechar aviso"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap gap-2 text-[11px]">
+                  {appliedSummary.routinesCount > 0 && (
+                    <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 font-medium flex items-center gap-1">
+                      <Repeat className="w-3 h-3" /> {appliedSummary.routinesCount} Rotina(s)
+                    </span>
+                  )}
+                  {appliedSummary.projectsCount > 0 && (
+                    <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 font-medium flex items-center gap-1">
+                      <Layers className="w-3 h-3" /> {appliedSummary.projectsCount} Projeto(s)
+                    </span>
+                  )}
+                  {appliedSummary.tasksCount > 0 && (
+                    <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 font-medium flex items-center gap-1">
+                      <Clock className="w-3 h-3" /> {appliedSummary.tasksCount} Tarefa(s)
+                    </span>
+                  )}
+                  {appliedSummary.profileUpdated && (
+                    <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 font-medium flex items-center gap-1">
+                      <ShieldAlert className="w-3 h-3" /> Limites Atualizados
+                    </span>
+                  )}
+                </div>
+
+                {onNavigateTab && (
+                  <div className="pt-2 border-t border-emerald-500/20 flex flex-wrap gap-2">
+                    <span className="text-[11px] text-gray-400 flex items-center mr-1">Ir para:</span>
+                    <button
+                      onClick={() => onNavigateTab('today')}
+                      className="px-3 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-semibold rounded-lg text-xs flex items-center gap-1 transition-colors border border-emerald-500/30"
+                    >
+                      <Calendar className="w-3.5 h-3.5" /> Agenda de Hoje <ArrowRight className="w-3 h-3" />
+                    </button>
+                    <button
+                      onClick={() => onNavigateTab('routines')}
+                      className="px-3 py-1.5 bg-white/5 hover:bg-white/10 text-gray-200 font-semibold rounded-lg text-xs flex items-center gap-1 transition-colors border border-white/10"
+                    >
+                      <Repeat className="w-3.5 h-3.5 text-accent-amber" /> Rotinas Semanais <ArrowRight className="w-3 h-3" />
+                    </button>
+                    <button
+                      onClick={() => onNavigateTab('projects')}
+                      className="px-3 py-1.5 bg-white/5 hover:bg-white/10 text-gray-200 font-semibold rounded-lg text-xs flex items-center gap-1 transition-colors border border-white/10"
+                    >
+                      <FolderKanban className="w-3.5 h-3.5 text-blue-400" /> Projetos <ArrowRight className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Proposta Legada de Tarefas da IA (quando vem apenas lista de tarefas) */}
+            {proposedTasks && !proposedPlan && (
               <div className="bg-background border-2 border-accent-amber/40 rounded-xl p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <h4 className="text-xs font-bold text-accent-amber uppercase tracking-wider">

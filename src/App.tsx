@@ -321,6 +321,8 @@ export default function App() {
                 profile={profile} 
                 projects={projects} 
                 tasks={tasks}
+                routines={routines}
+                onNavigateTab={(tab) => setActiveTab(tab as Tab)}
               />
             )}
             {activeTab === 'dashboard' && (
