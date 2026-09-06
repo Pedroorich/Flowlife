@@ -22,6 +22,7 @@ import { Task, AIAgent, UserProfile } from '../types';
 import { cn } from '../lib/utils';
 import { soundEngine } from '../lib/notificationEngine';
 import { getGeminiApiKey, callGemini, formatGeminiErrorMessage } from '../lib/gemini';
+import { ChatMessageFormatter } from './ChatMessageFormatter';
 
 interface TaskCopilotDrawerProps {
   task: Task;
@@ -129,7 +130,11 @@ CONTEXTO DA TAREFA ATUAL:
 HISTÓRICO DA CONVERSA:
 ${newHistory.map(m => `${m.role === 'user' ? 'Usuário' : agent.name}: ${m.text}`).join('\n\n')}
 
-Responda de forma altamente prática, direta e estruturada para que o usuário possa aplicar imediatamente na tarefa agora!`;
+Responda de forma altamente prática, direta e estruturada para que o usuário possa aplicar imediatamente:
+- Divida sua resposta em parágrafos curtos e respirados com espaçamento duplo (\n\n).
+- Destaque termos-chave em **negrito**.
+- Use listas com marcadores (• ou -) para passos e sugestões acionáveis.
+- NUNCA envie blocos densos ou textos corridos sem espaçamento.`;
 
       const responseText = await callGemini({
         apiKey,
@@ -307,7 +312,7 @@ Responda de forma altamente prática, direta e estruturada para que o usuário p
                     : "bg-accent-amber text-background ml-auto font-medium"
                 )}
               >
-                <div className="whitespace-pre-wrap font-sans">{m.text}</div>
+                <ChatMessageFormatter content={m.text} isUser={!isAgent} />
 
                 {isAgent && m.id !== 'init' && (
                   <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center gap-2 justify-end">

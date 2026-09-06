@@ -84,6 +84,25 @@ export function formatGeminiErrorMessage(error: any): string {
   return rawMsg;
 }
 
+function isPureTextModel(name: string): boolean {
+  const lower = name.toLowerCase();
+  // Exclui modelos de TTS, áudio, imagem, embedding e outros não textuais
+  if (
+    lower.includes('tts') ||
+    lower.includes('audio') ||
+    lower.includes('image') ||
+    lower.includes('imagen') ||
+    lower.includes('veo') ||
+    lower.includes('embedding') ||
+    lower.includes('realtime') ||
+    lower.includes('bison') ||
+    lower.includes('aqa')
+  ) {
+    return false;
+  }
+  return lower.includes('gemini');
+}
+
 /**
  * Consulta a lista de modelos suportados pela chave do usuário em tempo real.
  */
@@ -122,7 +141,8 @@ export async function getAvailableModels(apiKey: string): Promise<{
     if (Array.isArray(data?.models)) {
       const models = data.models
         .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
-        .map((m: any) => m.name.replace(/^models\//, ''));
+        .map((m: any) => m.name.replace(/^models\//, ''))
+        .filter(isPureTextModel);
 
       if (models.length > 0) {
         return { success: true, models };
@@ -138,7 +158,8 @@ export async function getAvailableModels(apiKey: string): Promise<{
     if (Array.isArray(data?.models)) {
       const models = data.models
         .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
-        .map((m: any) => m.name.replace(/^models\//, ''));
+        .map((m: any) => m.name.replace(/^models\//, ''))
+        .filter(isPureTextModel);
 
       if (models.length > 0) {
         return { success: true, models };
@@ -205,20 +226,23 @@ export async function callGemini(options: {
     throw new Error(formatGeminiErrorMessage(avail.error || 'Generative Language API desativada'));
   }
 
-  // Modelos candidatos padrão
-  let candidateModels = [
+  // Modelos candidatos padrão para texto (ordenados por qualidade e velocidade)
+  const defaultTextModels = [
     'gemini-2.0-flash',
     'gemini-1.5-flash-latest',
     'gemini-1.5-flash',
+    'gemini-1.5-pro-latest',
     'gemini-1.5-pro',
     'gemini-pro'
   ];
 
+  let candidateModels = [...defaultTextModels];
+
   if (avail.success && avail.models.length > 0) {
-    // Dá prioridade aos modelos que a API confirmou que existem nesta conta
-    const flashList = avail.models.filter(m => m.includes('flash'));
-    const others = avail.models.filter(m => !m.includes('flash'));
-    candidateModels = [...new Set([...flashList, ...others, ...candidateModels])];
+    // Modelos que a API confirmou que existem nesta conta e que são exclusivamente de texto
+    const flashList = avail.models.filter(m => m.includes('flash') && isPureTextModel(m));
+    const others = avail.models.filter(m => !m.includes('flash') && isPureTextModel(m));
+    candidateModels = [...new Set([...flashList, ...others, ...defaultTextModels])];
   }
 
   const ai = new GoogleGenAI({ apiKey: cleanKey });
@@ -238,9 +262,12 @@ export async function callGemini(options: {
     } catch (err: any) {
       console.warn(`Falha com modelo ${model} via SDK:`, err?.message || err);
       lastError = err;
-      if (err?.message?.includes('API_KEY_INVALID') || err?.status === 400 || err?.status === 403) {
+      // Apenas aborta imediatamente se for erro de autenticação (chave inválida)
+      const isAuthError = err?.message?.includes('API_KEY_INVALID') || err?.message?.includes('API key not valid');
+      if (isAuthError) {
         throw new Error(formatGeminiErrorMessage(err));
       }
+      // Se for erro 400 (ex: modalidade de modelo incorreta), CONTINUA para o próximo modelo!
     }
   }
 

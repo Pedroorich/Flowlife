@@ -26,6 +26,7 @@ import { getGeminiApiKey, saveGeminiApiKey, testGeminiApiKey, callGemini, format
 import { format } from 'date-fns';
 import { cn } from '../lib/utils';
 import { DEFAULT_AI_AGENTS } from '../lib/defaultAgents';
+import { ChatMessageFormatter } from './ChatMessageFormatter';
 
 const TASK_TYPES: TaskType[] = ["Projeto", "Tarefa", "Compromisso", "Entrega", "Reunião", "Meta", "Hábito", "Outro"];
 const PRIORITIES: Priority[] = ["Alta", "Média", "Baixa"];
@@ -323,8 +324,15 @@ RESPONDA SEMPRE EM JSON no seguinte formato:
 Se precisar perguntar algo ou esclarecer uma dúvida:
 {
   "action": "reply",
-  "message": "Sua resposta estratégica e direta aqui..."
+  "message": "Sua resposta formatada em parágrafos aqui..."
 }
+
+REGRAS OBRIGATÓRIAS DE FORMATAÇÃO DO CAMPO 'message':
+1. NUNCA envie texto corrido em um único bloco.
+2. Divida SEMPRE sua resposta em parágrafos curtos e respirados usando quebras duplas de linha (\\n\\n).
+3. Destaque termos-chave, horários e prioridades com **negrito**.
+4. Use tópicos com marcadores (• ou -) para perguntas, opções ou etapas.
+5. Seja direto, prático e visualmente agradável de ler.
 
 Se tiver informações suficientes para criar as tarefas/rotinas na agenda:
 {
@@ -635,13 +643,13 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
               <div 
                 key={i} 
                 className={cn(
-                  "p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed",
+                  "p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed shadow-sm",
                   m.role === 'user' 
                     ? "bg-accent-amber text-background ml-auto font-medium" 
                     : "bg-background border border-border text-gray-200"
                 )}
               >
-                {m.text}
+                <ChatMessageFormatter content={m.text} isUser={m.role === 'user'} />
               </div>
             ))}
 
