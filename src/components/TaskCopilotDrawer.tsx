@@ -21,7 +21,7 @@ import {
 import { Task, AIAgent, UserProfile } from '../types';
 import { cn } from '../lib/utils';
 import { soundEngine } from '../lib/notificationEngine';
-import { getGeminiApiKey, callGemini } from '../lib/gemini';
+import { getGeminiApiKey, callGemini, formatGeminiErrorMessage } from '../lib/gemini';
 
 interface TaskCopilotDrawerProps {
   task: Task;
@@ -142,10 +142,10 @@ Responda de forma altamente prática, direta e estruturada para que o usuário p
       ]);
     } catch (e: any) {
       console.error('Erro no copiloto:', e);
-      const msg = e?.message || 'Erro de conexão com a IA.';
+      const msg = formatGeminiErrorMessage(e);
       setMessages(prev => [
         ...prev,
-        { role: 'agent', text: `Desculpe, tive um problema ao conectar com a IA (${msg}). Verifique sua chave da API ou tente novamente.`, id: `err-${Date.now()}` }
+        { role: 'agent', text: `⚠️ ${msg}`, id: `err-${Date.now()}` }
       ]);
     } finally {
       setLoading(false);

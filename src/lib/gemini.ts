@@ -58,6 +58,98 @@ export async function saveGeminiApiKey(key: string, profileUid?: string): Promis
 }
 
 /**
+ * Formata mensagens de erro da API do Google para um texto em português claro e com instruções de resolução.
+ */
+export function formatGeminiErrorMessage(error: any): string {
+  const rawMsg = error?.message || (typeof error === 'string' ? error : JSON.stringify(error));
+
+  if (
+    rawMsg.includes('not found for API version') || 
+    rawMsg.includes('ListModels') ||
+    rawMsg.includes('not been used in project') ||
+    rawMsg.includes('is disabled') ||
+    rawMsg.includes('PERMISSION_DENIED')
+  ) {
+    return 'Esta chave de API não possui a "Generative Language API" habilitada no seu projeto Google Cloud.\n\n👉 Para resolver em 1 minuto:\n1. Acesse: https://aistudio.google.com/app/apikey com sua conta Google.\n2. Clique no botão "Create API key" (e selecione "Create API key in new project").\n3. Copie a chave gerada lá e cole aqui no FlowLife.\n(As chaves criadas diretamente pelo Google AI Studio já vêm com os modelos Gemini liberados gratuitamente).';
+  }
+
+  if (rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('API key not valid')) {
+    return 'Chave de API inválida. Verifique se copiou a chave completa gerada no Google AI Studio (iniciando com "AIzaSy...").';
+  }
+
+  if (rawMsg.includes('RESOURCE_EXHAUSTED') || rawMsg.includes('quota')) {
+    return 'Limite de requisições gratuitas atingido temporariamente pelo Google. Aguarde alguns instantes e tente novamente.';
+  }
+
+  return rawMsg;
+}
+
+/**
+ * Consulta a lista de modelos suportados pela chave do usuário em tempo real.
+ */
+export async function getAvailableModels(apiKey: string): Promise<{
+  success: boolean;
+  models: string[];
+  error?: string;
+  isGenerativeApiDisabled?: boolean;
+}> {
+  const cleanKey = apiKey.trim();
+  if (!cleanKey) {
+    return { success: false, models: [], error: 'Chave não informada.' };
+  }
+
+  // 1. Tenta endpoint v1beta
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`);
+    const data = await res.json();
+
+    if (data?.error) {
+      const msg = data.error.message || '';
+      const isGenerativeApiDisabled = 
+        msg.includes('not been used in project') || 
+        msg.includes('is disabled') ||
+        msg.includes('not found for API version') ||
+        data.error.status === 'PERMISSION_DENIED';
+
+      return {
+        success: false,
+        models: [],
+        error: msg,
+        isGenerativeApiDisabled,
+      };
+    }
+
+    if (Array.isArray(data?.models)) {
+      const models = data.models
+        .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
+        .map((m: any) => m.name.replace(/^models\//, ''));
+
+      if (models.length > 0) {
+        return { success: true, models };
+      }
+    }
+  } catch (_) {}
+
+  // 2. Tenta endpoint v1
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1/models?key=${cleanKey}`);
+    const data = await res.json();
+
+    if (Array.isArray(data?.models)) {
+      const models = data.models
+        .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
+        .map((m: any) => m.name.replace(/^models\//, ''));
+
+      if (models.length > 0) {
+        return { success: true, models };
+      }
+    }
+  } catch (_) {}
+
+  return { success: false, models: [] };
+}
+
+/**
  * Testa a validade de uma chave Gemini executando uma chamada simples.
  */
 export async function testGeminiApiKey(key: string): Promise<{ success: boolean; error?: string }> {
@@ -66,26 +158,33 @@ export async function testGeminiApiKey(key: string): Promise<{ success: boolean;
     return { success: false, error: 'Chave não informada.' };
   }
 
+  // Verifica se a chave tem acesso à Generative Language API
+  const avail = await getAvailableModels(cleanKey);
+  if (!avail.success && avail.isGenerativeApiDisabled) {
+    return {
+      success: false,
+      error: formatGeminiErrorMessage(avail.error)
+    };
+  }
+
   try {
-    const ai = new GoogleGenAI({ apiKey: cleanKey });
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: 'Responda apenas com a palavra: OK',
+    const text = await callGemini({
+      apiKey: cleanKey,
+      prompt: 'Diga apenas: OK',
     });
 
-    if (response && response.text) {
+    if (text) {
       return { success: true };
     }
     return { success: false, error: 'Resposta vazia da API do Gemini.' };
   } catch (error: any) {
     console.error('Erro ao testar chave Gemini:', error);
-    const msg = error?.message || error?.toString() || 'Erro desconhecido ao conectar com a API do Gemini.';
-    return { success: false, error: msg };
+    return { success: false, error: formatGeminiErrorMessage(error) };
   }
 }
 
 /**
- * Executa uma chamada à API do Gemini com fallback automático de modelos suportados.
+ * Executa uma chamada à API do Gemini com descoberta dinâmica de modelos e fallbacks automáticos.
  */
 export async function callGemini(options: {
   apiKey: string;
@@ -97,13 +196,35 @@ export async function callGemini(options: {
     throw new Error('Chave da API do Google Gemini não encontrada.');
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  const cleanKey = apiKey.trim();
   const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
 
-  // Lista de modelos suportados em ordem de preferência
-  const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  // Consulta modelos disponíveis para esta chave
+  const avail = await getAvailableModels(cleanKey);
+  if (!avail.success && avail.isGenerativeApiDisabled) {
+    throw new Error(formatGeminiErrorMessage(avail.error || 'Generative Language API desativada'));
+  }
+
+  // Modelos candidatos padrão
+  let candidateModels = [
+    'gemini-2.0-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro',
+    'gemini-pro'
+  ];
+
+  if (avail.success && avail.models.length > 0) {
+    // Dá prioridade aos modelos que a API confirmou que existem nesta conta
+    const flashList = avail.models.filter(m => m.includes('flash'));
+    const others = avail.models.filter(m => !m.includes('flash'));
+    candidateModels = [...new Set([...flashList, ...others, ...candidateModels])];
+  }
+
+  const ai = new GoogleGenAI({ apiKey: cleanKey });
   let lastError: any = null;
 
+  // Tentativa 1: SDK Oficial @google/genai
   for (const model of candidateModels) {
     try {
       const response = await ai.models.generateContent({
@@ -115,13 +236,58 @@ export async function callGemini(options: {
         return response.text;
       }
     } catch (err: any) {
-      console.warn(`Falha com modelo ${model}:`, err?.message || err);
+      console.warn(`Falha com modelo ${model} via SDK:`, err?.message || err);
       lastError = err;
       if (err?.message?.includes('API_KEY_INVALID') || err?.status === 400 || err?.status === 403) {
-        throw err;
+        throw new Error(formatGeminiErrorMessage(err));
       }
     }
   }
 
-  throw lastError || new Error('Não foi possível obter resposta da IA.');
+  // Tentativa 2: Chamada direta via REST API v1beta
+  for (const model of candidateModels.slice(0, 3)) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: fullPrompt }] }]
+        })
+      });
+      const data = await res.json();
+      if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+        return data.candidates[0].content.parts[0].text;
+      }
+      if (data?.error) {
+        lastError = data.error;
+      }
+    } catch (fetchErr) {
+      lastError = fetchErr;
+    }
+  }
+
+  // Tentativa 3: Chamada direta via REST API v1
+  for (const model of ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${cleanKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: fullPrompt }] }]
+        })
+      });
+      const data = await res.json();
+      if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+        return data.candidates[0].content.parts[0].text;
+      }
+      if (data?.error) {
+        lastError = data.error;
+      }
+    } catch (fetchErr) {
+      lastError = fetchErr;
+    }
+  }
+
+  throw new Error(formatGeminiErrorMessage(lastError));
 }
+

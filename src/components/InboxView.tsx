@@ -22,7 +22,7 @@ import {
   ExternalLink,
   CheckCircle2
 } from 'lucide-react';
-import { getGeminiApiKey, saveGeminiApiKey, testGeminiApiKey, callGemini } from '../lib/gemini';
+import { getGeminiApiKey, saveGeminiApiKey, testGeminiApiKey, callGemini, formatGeminiErrorMessage } from '../lib/gemini';
 import { format } from 'date-fns';
 import { cn } from '../lib/utils';
 import { DEFAULT_AI_AGENTS } from '../lib/defaultAgents';
@@ -388,8 +388,8 @@ Projetos cadastrados: ${projects.map(p => p.name).join(', ')}.`;
 
     } catch (error: any) {
       console.error("AI Error", error);
-      const errMsg = error?.message || "Erro de conexão com a IA.";
-      setMessages(prev => [...prev, { role: 'ai', text: `Desculpe, tive um problema ao processar sua solicitação por voz/texto (${errMsg}). Verifique sua chave de API ou tente novamente.` }]);
+      const errMsg = formatGeminiErrorMessage(error);
+      setMessages(prev => [...prev, { role: 'ai', text: `⚠️ ${errMsg}` }]);
     } finally {
       setIsTyping(false);
     }
