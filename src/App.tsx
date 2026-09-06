@@ -238,9 +238,24 @@ export default function App() {
               </div>
               <h1 className="font-serif text-lg text-white font-bold">FlowLife</h1>
             </div>
-            <button onClick={handleLogout} className="text-gray-400">
-              <LogOut className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={() => setActiveTab('notifications')}
+                className={cn(
+                  "p-2 rounded-xl transition-all flex items-center gap-1",
+                  activeTab === 'notifications' 
+                    ? "bg-accent-amber text-background font-bold shadow-md" 
+                    : "text-accent-amber bg-accent-amber/10 border border-accent-amber/20"
+                )}
+                title="Central de Notificações"
+              >
+                <Bell className="w-4 h-4" />
+                <span className="text-[11px] font-bold">Alertas</span>
+              </button>
+              <button onClick={handleLogout} className="text-gray-400 p-2" title="Sair">
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           {/* Tab Content */}
@@ -300,7 +315,10 @@ export default function App() {
               <NotificationsView profile={profile} />
             )}
             {activeTab === 'settings' && (
-              <SettingsView profile={profile} />
+              <SettingsView 
+                profile={profile} 
+                onNavigateToNotifications={() => setActiveTab('notifications')} 
+              />
             )}
           </div>
         </div>

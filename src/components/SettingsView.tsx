@@ -2,13 +2,14 @@ import React, { useState } from 'react';
 import { UserProfile } from '../types';
 import { db } from '../firebase';
 import { doc, updateDoc } from 'firebase/firestore';
-import { Settings, Save, Check } from 'lucide-react';
+import { Settings, Save, Check, Bell, Smartphone } from 'lucide-react';
 
 interface SettingsViewProps {
   profile: UserProfile;
+  onNavigateToNotifications?: () => void;
 }
 
-export function SettingsView({ profile }: SettingsViewProps) {
+export function SettingsView({ profile, onNavigateToNotifications }: SettingsViewProps) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [form, setForm] = useState({
@@ -45,9 +46,32 @@ export function SettingsView({ profile }: SettingsViewProps) {
         </div>
         <div>
           <h2 className="font-serif text-3xl text-accent-amber">Configurações</h2>
-          <p className="text-gray-400">Configure suas integrações e autmoações.</p>
+          <p className="text-gray-400">Configure suas integrações e automações.</p>
         </div>
       </div>
+
+      {/* Card de Acesso Rápido a Notificações e PWA */}
+      {onNavigateToNotifications && (
+        <div className="bg-surface border border-accent-amber/30 rounded-xl p-5 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-3 bg-accent-amber/20 text-accent-amber rounded-xl">
+              <Bell className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-white">Central de Notificações & PWA</h3>
+              <p className="text-xs text-gray-400">
+                Ative alertas de início, aviso de 5 minutos e encerramento no seu iPhone.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onNavigateToNotifications}
+            className="px-4 py-2 bg-accent-amber text-background font-bold text-xs rounded-lg hover:bg-amber-400 transition-colors shrink-0"
+          >
+            Abrir Alertas
+          </button>
+        </div>
+      )}
 
       <div className="bg-surface border border-border rounded-xl p-6">
         <h3 className="text-xl font-medium mb-4">Webhooks de Atividades</h3>
