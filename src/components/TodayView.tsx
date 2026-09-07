@@ -20,7 +20,8 @@ import {
   ShieldAlert,
   Coffee,
   Car,
-  Trash2
+  Trash2,
+  Plus
 } from 'lucide-react';
 import { format, parseISO, isSameDay } from 'date-fns';
 import { cn, sendBrowserNotification } from '../lib/utils';
