@@ -71,12 +71,15 @@ export function TodayView({
     setTimeout(() => setRecalcFeedback(false), 3000);
   };
 
-  // Timer & Modo Foco State
+  // Timer & Modo Foco State (com sincronização de relógio real Date.now e persistência)
   const [activeTimer, setActiveTimer] = useState<{ 
     taskId: string; 
     timeLeft: number; 
     totalSeconds: number;
     isPaused: boolean;
+    startEpochMs?: number;
+    endEpochMs?: number;
+    pausedRemainingSeconds?: number;
   } | null>(null);
 
   // Overthinking Alert State
@@ -128,19 +131,145 @@ export function TodayView({
     setTimeline(updated);
   }, [tasks, profile, routines, unforeseenEvents, todayDate]);
 
-  // Sincronizar activeTimer com o dailyState
+  // Alternar Pausa / Retomada mantendo a precisão cronológica
+  const handleToggleTimerPause = () => {
+    setActiveTimer(prev => {
+      if (!prev) return null;
+      const nowMs = Date.now();
+      if (!prev.isPaused) {
+        // Pausando: congela o tempo restante
+        const realLeft = prev.endEpochMs ? Math.max(0, Math.round((prev.endEpochMs - nowMs) / 1000)) : prev.timeLeft;
+        const updated = {
+          ...prev,
+          isPaused: true,
+          timeLeft: realLeft,
+          pausedRemainingSeconds: realLeft
+        };
+        try {
+          localStorage.setItem('flowlife_active_timer', JSON.stringify(updated));
+        } catch (_) {}
+        return updated;
+      } else {
+        // Retomando: recalcula novo endEpochMs a partir de agora
+        const left = prev.pausedRemainingSeconds ?? prev.timeLeft;
+        const newEndEpochMs = nowMs + left * 1000;
+        const updated = {
+          ...prev,
+          isPaused: false,
+          timeLeft: left,
+          startEpochMs: nowMs,
+          endEpochMs: newEndEpochMs,
+          pausedRemainingSeconds: undefined
+        };
+        try {
+          localStorage.setItem('flowlife_active_timer', JSON.stringify(updated));
+        } catch (_) {}
+
+        // Sincroniza novo término com o Firestore
+        updateDoc(doc(db, 'users', profile.uid), {
+          'dailyState.taskEndTime': new Date(newEndEpochMs).toISOString()
+        }).catch(console.error);
+
+        return updated;
+      }
+    });
+  };
+
+  // Restaurar activeTimer do localStorage ou profile.dailyState (para nunca perder timer ao sair do app)
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('flowlife_active_timer');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.taskId) {
+          const nowMs = Date.now();
+          if (parsed.isPaused) {
+            setActiveTimer(parsed);
+            return;
+          }
+          if (parsed.endEpochMs) {
+            const calculatedTimeLeft = Math.max(0, Math.round((parsed.endEpochMs - nowMs) / 1000));
+            setActiveTimer({
+              ...parsed,
+              timeLeft: calculatedTimeLeft
+            });
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Erro ao restaurar timer do localStorage:', e);
+    }
+
+    if (profile.dailyState?.active && profile.dailyState?.currentTaskId) {
+      const task = tasks.find(t => t.id === profile.dailyState?.currentTaskId);
+      const totalSeconds = (task?.timeEstimate || 30) * 60;
+      const nowMs = Date.now();
+      let endEpochMs = nowMs + totalSeconds * 1000;
+      let calculatedTimeLeft = totalSeconds;
+
+      if (profile.dailyState.taskEndTime) {
+        endEpochMs = new Date(profile.dailyState.taskEndTime).getTime();
+        calculatedTimeLeft = Math.max(0, Math.round((endEpochMs - nowMs) / 1000));
+      }
+
+      const restored = {
+        taskId: profile.dailyState.currentTaskId,
+        timeLeft: calculatedTimeLeft,
+        totalSeconds,
+        isPaused: false,
+        startEpochMs: profile.dailyState.taskStartTime ? new Date(profile.dailyState.taskStartTime).getTime() : nowMs,
+        endEpochMs
+      };
+      setActiveTimer(restored);
+      try {
+        localStorage.setItem('flowlife_active_timer', JSON.stringify(restored));
+      } catch (_) {}
+    }
+  }, [profile.dailyState?.active, profile.dailyState?.currentTaskId]);
+
+  // Ouvir visibilidade da aba/janela para atualizar instantaneamente ao retornar ao app
+  useEffect(() => {
+    const handleSyncOnResume = () => {
+      setActiveTimer(prev => {
+        if (!prev || prev.isPaused || !prev.endEpochMs) return prev;
+        const nowMs = Date.now();
+        const realLeft = Math.max(0, Math.round((prev.endEpochMs - nowMs) / 1000));
+        const updated = { ...prev, timeLeft: realLeft };
+        try {
+          localStorage.setItem('flowlife_active_timer', JSON.stringify(updated));
+        } catch (_) {}
+        return updated;
+      });
+    };
+
+    document.addEventListener('visibilitychange', handleSyncOnResume);
+    window.addEventListener('focus', handleSyncOnResume);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleSyncOnResume);
+      window.removeEventListener('focus', handleSyncOnResume);
+    };
+  }, []);
+
+  // Relógio ativo baseado em timestamps físicos (Date.now())
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (activeTimer && !activeTimer.isPaused && activeTimer.timeLeft > 0) {
       interval = setInterval(() => {
         setActiveTimer(prev => {
-          if (!prev) return null;
-          const newTimeLeft = prev.timeLeft - 1;
+          if (!prev || prev.isPaused) return prev;
+          
+          const nowMs = Date.now();
+          const newTimeLeft = prev.endEpochMs 
+            ? Math.max(0, Math.round((prev.endEpochMs - nowMs) / 1000))
+            : Math.max(0, prev.timeLeft - 1);
+
           const elapsed = prev.totalSeconds - newTimeLeft;
 
           // Checar se atingiu o Limite Máximo (Overthinking)
           const currentTask = tasks.find(t => t.id === prev.taskId);
-          const maxAllowedSeconds = (currentTask?.timeMax || currentTask?.timeEstimate * 1.5 || 60) * 60;
+          const maxAllowedSeconds = (currentTask?.timeMax || (currentTask?.timeEstimate ? currentTask.timeEstimate * 1.5 : 60)) * 60;
 
           if (elapsed >= maxAllowedSeconds && !showOverthinkingModal && currentTask) {
             setOverthinkingTask(currentTask);
@@ -148,12 +277,19 @@ export function TodayView({
             notifyOverthinking(currentTask.title, Math.round(maxAllowedSeconds / 60));
           }
 
-          return { ...prev, timeLeft: newTimeLeft };
+          const updated = { ...prev, timeLeft: newTimeLeft };
+          if (newTimeLeft % 5 === 0 || newTimeLeft === 0) {
+            try {
+              localStorage.setItem('flowlife_active_timer', JSON.stringify(updated));
+            } catch (_) {}
+          }
+
+          return updated;
         });
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [activeTimer, showOverthinkingModal, tasks]);
+  }, [activeTimer?.isPaused, activeTimer?.taskId, activeTimer?.endEpochMs, showOverthinkingModal, tasks]);
 
   // Checagem de Notificações Locais (5 min e Encerramento)
   useEffect(() => {
@@ -181,6 +317,14 @@ export function TodayView({
   const [quickAddTitle, setQuickAddTitle] = useState('');
   const [quickAddEstimate, setQuickAddEstimate] = useState(45);
   const [quickAddProjectId, setQuickAddProjectId] = useState('');
+  const [quickAddStartTime, setQuickAddStartTime] = useState('');
+
+  const setQuickAddNow = () => {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    setQuickAddStartTime(`${hh}:${mm}`);
+  };
 
   const handlePullNextTaskToToday = async () => {
     const unallocated = tasks.filter(t => 
@@ -210,7 +354,7 @@ export function TodayView({
     if (!quickAddTitle.trim()) return;
 
     try {
-      await addDoc(collection(db, 'tasks'), {
+      const taskPayload: any = {
         userId: profile.uid,
         title: quickAddTitle.trim(),
         type: 'Tarefa',
@@ -224,9 +368,17 @@ export function TodayView({
         status: 'pending',
         dateAllocated: todayStr,
         createdAt: new Date().toISOString()
-      });
+      };
+
+      if (quickAddStartTime.trim()) {
+        taskPayload.scheduledStartTime = quickAddStartTime.trim();
+        taskPayload.isFixed = true; // Fixa no horário exato especificado pelo usuário
+      }
+
+      await addDoc(collection(db, 'tasks'), taskPayload);
 
       setQuickAddTitle('');
+      setQuickAddStartTime('');
       setShowQuickAddToday(false);
     } catch (e) {
       console.error('Erro ao criar tarefa para hoje:', e);
@@ -236,7 +388,19 @@ export function TodayView({
   // Iniciar Tarefa no Modo Foco
   const handleStartTask = async (task: Task) => {
     const totalMinutes = task.timeEstimate || 30;
-    const endTime = new Date(Date.now() + totalMinutes * 60000).toISOString();
+    const totalSeconds = totalMinutes * 60;
+    const nowMs = Date.now();
+    const endEpochMs = nowMs + totalSeconds * 1000;
+    const endTime = new Date(endEpochMs).toISOString();
+
+    const timerPayload = {
+      taskId: task.id!,
+      timeLeft: totalSeconds,
+      totalSeconds,
+      isPaused: false,
+      startEpochMs: nowMs,
+      endEpochMs
+    };
 
     try {
       await updateDoc(doc(db, 'users', profile.uid), {
@@ -244,19 +408,17 @@ export function TodayView({
           date: todayStr,
           active: true,
           currentTaskId: task.id,
-          taskStartTime: new Date().toISOString(),
+          taskStartTime: new Date(nowMs).toISOString(),
           taskEndTime: endTime,
           notified5Min: false,
           notifiedEnd: false
         }
       });
 
-      setActiveTimer({
-        taskId: task.id!,
-        timeLeft: totalMinutes * 60,
-        totalSeconds: totalMinutes * 60,
-        isPaused: false
-      });
+      setActiveTimer(timerPayload);
+      try {
+        localStorage.setItem('flowlife_active_timer', JSON.stringify(timerPayload));
+      } catch (_) {}
 
       // Disparar Notificação Sonora e Webhook de Início
       notifyTaskStart(task.title, totalMinutes, profile.webhookUrlStart || profile.webhookUrl);
@@ -291,6 +453,10 @@ export function TodayView({
       // Limpar timer se for a tarefa ativa
       if (activeTimer?.taskId === task.id) {
         setActiveTimer(null);
+        try {
+          localStorage.removeItem('flowlife_active_timer');
+        } catch (_) {}
+
         await updateDoc(doc(db, 'users', profile.uid), {
           'dailyState.currentTaskId': null,
           'dailyState.active': false
@@ -314,6 +480,10 @@ export function TodayView({
     try {
       if (activeTimer?.taskId === taskId) {
         setActiveTimer(null);
+        try {
+          localStorage.removeItem('flowlife_active_timer');
+        } catch (_) {}
+
         await updateDoc(doc(db, 'users', profile.uid), {
           'dailyState.currentTaskId': null,
           'dailyState.active': false
@@ -379,9 +549,9 @@ export function TodayView({
         createdAt: new Date().toISOString()
       });
 
-      // Se houver timer ativo, adicionar tempo equivalente ou pausar
-      if (activeTimer) {
-        setActiveTimer(prev => prev ? { ...prev, isPaused: true } : null);
+      // Se houver timer ativo, pausar de forma cronologicamente precisa
+      if (activeTimer && !activeTimer.isPaused) {
+        handleToggleTimerPause();
       }
 
       setShowInterruptionModal(false);
@@ -515,7 +685,7 @@ export function TodayView({
                 </div>
                 <div className="flex items-center gap-2">
                   <button 
-                    onClick={() => setActiveTimer(prev => prev ? { ...prev, isPaused: !prev.isPaused } : null)}
+                    onClick={handleToggleTimerPause}
                     className="p-2.5 rounded-xl bg-surface border border-border hover:border-gray-500 text-gray-300 transition-colors"
                     title={activeTimer.isPaused ? "Retomar" : "Pausar"}
                   >
@@ -686,20 +856,51 @@ export function TodayView({
                 </select>
               )}
             </div>
-            <div className="flex justify-end gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setShowQuickAddToday(false)}
-                className="px-3 py-1.5 rounded-lg border border-border text-gray-400 hover:text-white text-xs"
-              >
-                Cancelar
-              </button>
-              <button
-                type="submit"
-                className="px-4 py-1.5 bg-accent-amber text-background font-bold rounded-lg text-xs hover:bg-amber-400 transition-colors"
-              >
-                Salvar para Hoje
-              </button>
+
+            {/* Horário específico da tarefa */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/40">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-400">Horário previsto:</span>
+                <input
+                  type="time"
+                  value={quickAddStartTime}
+                  onChange={e => setQuickAddStartTime(e.target.value)}
+                  className="bg-surface border border-border rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-accent-amber font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={setQuickAddNow}
+                  className="px-2.5 py-1 bg-accent-amber/10 border border-accent-amber/30 hover:bg-accent-amber/20 text-accent-amber rounded-lg text-xs font-semibold transition-colors"
+                  title="Definir para o horário atual exato"
+                >
+                  ⚡ Agora
+                </button>
+                {quickAddStartTime && (
+                  <button
+                    type="button"
+                    onClick={() => setQuickAddStartTime('')}
+                    className="text-[11px] text-gray-400 hover:text-gray-200 underline decoration-dotted"
+                  >
+                    Limpar (Horário Flexível)
+                  </button>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowQuickAddToday(false)}
+                  className="px-3 py-1.5 rounded-lg border border-border text-gray-400 hover:text-white text-xs"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 bg-accent-amber text-background font-bold rounded-lg text-xs hover:bg-amber-400 transition-colors shadow-md"
+                >
+                  Salvar para Hoje
+                </button>
+              </div>
             </div>
           </form>
         )}
@@ -814,7 +1015,7 @@ export function TodayView({
                       </button>
                     ) : (
                       <button
-                        onClick={() => setActiveTimer(prev => prev ? { ...prev, isPaused: !prev.isPaused } : null)}
+                        onClick={handleToggleTimerPause}
                         className="px-3 py-1.5 rounded-xl bg-accent-amber/20 border border-accent-amber text-accent-amber font-bold text-xs"
                       >
                         {activeTimer?.isPaused ? 'Retomar' : 'Pausar'}
@@ -1020,7 +1221,7 @@ export function TodayView({
                             </button>
                           ) : (
                             <button 
-                              onClick={() => setActiveTimer(prev => prev ? { ...prev, isPaused: !prev.isPaused } : null)}
+                              onClick={handleToggleTimerPause}
                               className="p-2.5 rounded-lg bg-accent-amber/20 border border-accent-amber text-accent-amber"
                               title={activeTimer?.isPaused ? "Retomar" : "Pausar"}
                             >
@@ -1105,7 +1306,23 @@ export function TodayView({
               <button 
                 onClick={() => {
                   if (activeTimer) {
-                    setActiveTimer(prev => prev ? { ...prev, timeLeft: prev.timeLeft + 15 * 60 } : null);
+                    setActiveTimer(prev => {
+                      if (!prev) return null;
+                      const addedSecs = 15 * 60;
+                      const nowMs = Date.now();
+                      const baseEnd = prev.endEpochMs && prev.endEpochMs > nowMs ? prev.endEpochMs : nowMs + prev.timeLeft * 1000;
+                      const newEnd = baseEnd + addedSecs * 1000;
+                      const updated = {
+                        ...prev,
+                        timeLeft: prev.timeLeft + addedSecs,
+                        totalSeconds: prev.totalSeconds + addedSecs,
+                        endEpochMs: newEnd
+                      };
+                      try {
+                        localStorage.setItem('flowlife_active_timer', JSON.stringify(updated));
+                      } catch (_) {}
+                      return updated;
+                    });
                   }
                   setShowOverthinkingModal(false);
                 }}

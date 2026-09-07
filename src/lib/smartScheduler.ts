@@ -228,9 +228,9 @@ export function buildDailyTimeline(
   // 2. Injetar Compromissos Fixos Agendados do Usuário
   const fixedTasksForDay = tasks.filter(t => {
     if (t.status === 'completed') return false;
-    if (!t.isFixed) return false;
     const taskDate = t.dateAllocated || (t.startDate ? format(parseISO(t.startDate), 'yyyy-MM-dd') : '');
-    return taskDate === dateStr;
+    if (taskDate !== dateStr) return false;
+    return Boolean(t.isFixed || t.scheduledStartTime);
   });
 
   for (const task of fixedTasksForDay) {
@@ -270,26 +270,34 @@ export function buildDailyTimeline(
     duration: number;
   }
 
-  const workWindows: Window[] = [];
-  let pointer = workStartMin;
+  const now = new Date();
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const isToday = isSameDay(targetDate, now);
 
-  // Filtrar apenas bloqueios que colidem com o horário de trabalho
+  // CRUCIAL: Para o dia de hoje, janelas livres para novas tarefas NUNCA começam no passado!
+  // Se já são 09:15, o trabalho livre só pode começar a partir de 09:15, nunca às 08:30 do passado.
+  const effectiveStartMin = isToday ? Math.max(workStartMin, currentMinutes) : workStartMin;
+
+  const workWindows: Window[] = [];
+  let pointer = effectiveStartMin;
+
+  // Filtrar apenas bloqueios que colidem com o horário de trabalho a partir do horário efetivo
   const workBlockers = slots
-    .filter(s => s.endMinutes > workStartMin && s.startMinutes < workEndMin)
+    .filter(s => s.endMinutes > effectiveStartMin && s.startMinutes < workEndMin)
     .sort((a, b) => a.startMinutes - b.startMinutes);
 
   for (const blocker of workBlockers) {
-    const effectiveStart = Math.max(workStartMin, blocker.startMinutes);
-    const effectiveEnd = Math.min(workEndMin, blocker.endMinutes);
+    const effectiveBlockerStart = Math.max(effectiveStartMin, blocker.startMinutes);
+    const effectiveBlockerEnd = Math.min(workEndMin, blocker.endMinutes);
 
-    if (effectiveStart > pointer) {
+    if (effectiveBlockerStart > pointer) {
       workWindows.push({
         start: pointer,
-        end: effectiveStart,
-        duration: effectiveStart - pointer
+        end: effectiveBlockerStart,
+        duration: effectiveBlockerStart - pointer
       });
     }
-    pointer = Math.max(pointer, effectiveEnd);
+    pointer = Math.max(pointer, effectiveBlockerEnd);
   }
 
   if (pointer < workEndMin) {
@@ -310,7 +318,8 @@ export function buildDailyTimeline(
   // 4. Selecionar e Ordenar Tarefas Flexíveis por Prioridade Real
   const flexibleTasks = tasks.filter(t => {
     if (t.status === 'completed') return false;
-    if (t.isFixed) return false;
+    // Se possui horário fixo ou scheduledStartTime explícito, já foi tratado nos compromissos fixos
+    if (t.isFixed || t.scheduledStartTime) return false;
     
     // Alocadas para hoje ou com deadline hoje ou pendentes no backlog
     const taskDate = t.dateAllocated;
@@ -436,13 +445,11 @@ export function buildDailyTimeline(
 
   // 6. Determinar "O QUE FAZER AGORA" (Next Action)
   let nextAction: DailyTimelineResult['nextAction'] = undefined;
-  const now = new Date();
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
   if (isSameDay(targetDate, now)) {
-    // 1º: Há alguma tarefa em andamento ou alocada para o horário atual?
+    // 1º: Tarefa agendada ou fixa que coincide com o horário atual
     const currentTaskSlot = slots.find(s => 
-      s.type === 'task' && 
+      (s.type === 'task' || s.type === 'fixed_commitment') && 
       s.task && 
       s.task.status === 'pending' &&
       currentMinutes >= s.startMinutes && 
@@ -456,40 +463,64 @@ export function buildDailyTimeline(
         reason: `Agendada para este momento (${currentTaskSlot.startTime}–${currentTaskSlot.endTime}). ${currentTaskSlot.explanation || ''}`
       };
     } else {
-      // 2º: Próxima tarefa mais relevante que ainda não começou hoje
-      const upcomingTaskSlot = slots.find(s => 
-        s.type === 'task' && 
+      // 2º: Há alguma tarefa agendada para horário anterior de hoje que ainda está pendente?
+      const overduePendingSlot = slots.find(s => 
+        (s.type === 'task' || s.type === 'fixed_commitment') && 
         s.task && 
         s.task.status === 'pending' && 
-        s.startMinutes >= currentMinutes
+        s.endMinutes <= currentMinutes
       );
 
-      if (upcomingTaskSlot && upcomingTaskSlot.task) {
+      if (overduePendingSlot && overduePendingSlot.task) {
+        // Reagendada para agora em vez de indicar horário no passado!
+        const taskDuration = overduePendingSlot.task.timeEstimate || 45;
         nextAction = {
-          task: upcomingTaskSlot.task,
-          slot: upcomingTaskSlot,
-          reason: `Próxima tarefa da agenda. ${upcomingTaskSlot.explanation || ''}`
-        };
-      } else if (sortedTasks.length > 0) {
-        // 3º: Tarefa de maior prioridade real que ainda não foi concluída
-        const topTask = sortedTasks[0];
-        const breakdown = calculateRealPriority(topTask, targetDate);
-        nextAction = {
-          task: topTask,
+          task: overduePendingSlot.task,
           slot: {
-            id: `top-action-${topTask.id}`,
-            type: 'task',
-            title: topTask.title,
-            area: topTask.area,
+            ...overduePendingSlot,
             startTime: minutesToTime(currentMinutes),
-            endTime: minutesToTime(currentMinutes + topTask.timeEstimate),
+            endTime: minutesToTime(currentMinutes + taskDuration),
             startMinutes: currentMinutes,
-            endMinutes: currentMinutes + topTask.timeEstimate,
-            durationMinutes: topTask.timeEstimate,
-            task: topTask
+            endMinutes: currentMinutes + taskDuration
           },
-          reason: `Maior Prioridade Real no momento (Score: ${breakdown.totalScore}). ${breakdown.explanation}`
+          reason: `Horário previsto inicial (${overduePendingSlot.startTime}) ultrapassado. Reagendada para iniciar imediatamente.`
         };
+      } else {
+        // 3º: Próxima tarefa mais relevante agendada para o futuro hoje
+        const upcomingTaskSlot = slots.find(s => 
+          (s.type === 'task' || s.type === 'fixed_commitment') && 
+          s.task && 
+          s.task.status === 'pending' && 
+          s.startMinutes >= currentMinutes
+        );
+
+        if (upcomingTaskSlot && upcomingTaskSlot.task) {
+          nextAction = {
+            task: upcomingTaskSlot.task,
+            slot: upcomingTaskSlot,
+            reason: `Próxima tarefa da agenda (${upcomingTaskSlot.startTime}). ${upcomingTaskSlot.explanation || ''}`
+          };
+        } else if (sortedTasks.length > 0) {
+          // 4º: Tarefa de maior prioridade real que ainda não foi concluída
+          const topTask = sortedTasks[0];
+          const breakdown = calculateRealPriority(topTask, targetDate);
+          nextAction = {
+            task: topTask,
+            slot: {
+              id: `top-action-${topTask.id}`,
+              type: 'task',
+              title: topTask.title,
+              area: topTask.area,
+              startTime: minutesToTime(currentMinutes),
+              endTime: minutesToTime(currentMinutes + topTask.timeEstimate),
+              startMinutes: currentMinutes,
+              endMinutes: currentMinutes + topTask.timeEstimate,
+              durationMinutes: topTask.timeEstimate,
+              task: topTask
+            },
+            reason: `Maior Prioridade Real no momento (Score: ${breakdown.totalScore}). ${breakdown.explanation}`
+          };
+        }
       }
     }
   }
@@ -583,7 +614,8 @@ export function distributeWorkAcrossWeek(
   routines: RoutineBlock[] = [],
   unforeseenEvents: UnforeseenEvent[] = [],
   targetProjectId?: string,
-  startDate: Date = new Date()
+  startDate: Date = new Date(),
+  maxBusinessDays: number = 22 // Cobre até um mês inteiro útil (~4 semanas de trabalho)
 ): {
   allocations: { taskId: string; dateAllocated: string; dayName: string }[];
   summary: string;
@@ -608,12 +640,11 @@ export function distributeWorkAcrossWeek(
   // Ordenar tarefas candidatas por prioridade real
   const sortedCandidates = sortTasksByRealPriority(candidateTasks, startDate);
 
-  // Mapear os próximos 5 a 7 dias úteis a partir de hoje
+  // Mapear dias úteis (Segunda a Sexta) até cobrir as tarefas ou atingir maxBusinessDays
   const daysToPlan: Date[] = [];
   let dayCursor = startOfDay(startDate);
 
-  // Se for sábado ou domingo, avança para a próxima segunda
-  while (daysToPlan.length < 5) {
+  while (daysToPlan.length < maxBusinessDays) {
     const dOfWeek = getDay(dayCursor);
     if (dOfWeek >= 1 && dOfWeek <= 5) { // Segunda a Sexta
       daysToPlan.push(new Date(dayCursor));
@@ -636,7 +667,7 @@ export function distributeWorkAcrossWeek(
     const dayTimeline = buildDailyTimeline(day, tasks, profile, routines, unforeseenEvents);
     let remainingMinutes = Math.max(0, dayTimeline.totalAvailableWorkMinutes - dayTimeline.totalPlannedWorkMinutes);
 
-    // Se já estiver sobrecarregado ou quase cheio, pula para o próximo dia
+    // Se já estiver sobrecarregado ou quase cheio, pula para o próximo dia útil
     if (remainingMinutes < 20) continue;
 
     while (taskIndex < sortedCandidates.length && remainingMinutes >= 20) {
@@ -657,26 +688,29 @@ export function distributeWorkAcrossWeek(
     }
   }
 
-  // Se ainda sobraram tarefas que excederam os 5 dias úteis, aloca no último dia útil para não sumir
-  const lastDay = daysToPlan[daysToPlan.length - 1];
-  const lastDateStr = format(lastDay, 'yyyy-MM-dd');
-  const lastDayName = DAY_LABELS[getDay(lastDay)];
+  // Se ainda sobraram tarefas que excederam o horizonte do mês, aloca no último dia planejado
+  if (taskIndex < sortedCandidates.length && daysToPlan.length > 0) {
+    const lastDay = daysToPlan[daysToPlan.length - 1];
+    const lastDateStr = format(lastDay, 'yyyy-MM-dd');
+    const lastDayName = DAY_LABELS[getDay(lastDay)];
 
-  while (taskIndex < sortedCandidates.length) {
-    const currentTask = sortedCandidates[taskIndex];
-    if (currentTask.id) {
-      allocations.push({
-        taskId: currentTask.id,
-        dateAllocated: lastDateStr,
-        dayName: lastDayName
-      });
+    while (taskIndex < sortedCandidates.length) {
+      const currentTask = sortedCandidates[taskIndex];
+      if (currentTask.id) {
+        allocations.push({
+          taskId: currentTask.id,
+          dateAllocated: lastDateStr,
+          dayName: lastDayName
+        });
+      }
+      taskIndex++;
     }
-    taskIndex++;
   }
 
+  const daysUsed = new Set(allocations.map(a => a.dateAllocated)).size;
   return {
     allocations,
-    summary: `${allocations.length} tarefas de trabalho distribuídas harmonicamente ao longo dos dias úteis da semana!`
+    summary: `${allocations.length} tarefas de trabalho distribuídas harmonicamente em ${daysUsed} dias úteis rumo à conclusão mensal!`
   };
 }
 
