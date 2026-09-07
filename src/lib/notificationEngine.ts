@@ -285,3 +285,161 @@ export function notifyTimelineTaskStarting(taskTitle: string, scheduledTime: str
     sound: 'start'
   });
 }
+
+export function notifyRoutineStart(routineTitle: string, scheduledTime: string, webhookUrl?: string) {
+  return sendFlowNotification({
+    title: 'FlowLife - Bloco de Rotina Iniciando',
+    body: `São ${scheduledTime}! Hora da sua atividade: "${routineTitle}".`,
+    tag: `routine-start-${routineTitle.slice(0, 15)}`,
+    sound: 'start',
+    webhookUrl,
+    webhookPayload: {
+      event: 'routine_started',
+      routine: routineTitle,
+      time: scheduledTime
+    }
+  });
+}
+
+export function notifyRoutineWarning5Min(routineTitle: string, scheduledTime: string, webhookUrl?: string) {
+  return sendFlowNotification({
+    title: 'FlowLife - 5 Minutos para Iniciar',
+    body: `Faltam 5 minutos para "${routineTitle}" (início às ${scheduledTime}). Prepare-se!`,
+    tag: `routine-warn-5m-${routineTitle.slice(0, 15)}`,
+    sound: 'warning',
+    webhookUrl,
+    webhookPayload: {
+      event: 'routine_5min_warning',
+      routine: routineTitle,
+      time: scheduledTime
+    }
+  });
+}
+
+export function notifyTaskWarning5MinBeforeStart(taskTitle: string, scheduledTime: string, webhookUrl?: string) {
+  return sendFlowNotification({
+    title: 'FlowLife - Próxima Tarefa em 5 Minutos',
+    body: `Às ${scheduledTime} começa: "${taskTitle}". Prepare seu ambiente de foco!`,
+    tag: `task-warn-start-${taskTitle.slice(0, 15)}`,
+    sound: 'warning',
+    webhookUrl,
+    webhookPayload: {
+      event: 'task_pre_start_warning',
+      task: taskTitle,
+      time: scheduledTime
+    }
+  });
+}
+
+/**
+ * Monitor Global de Notificações de Agenda (Rotinas + Tarefas + Encerramento)
+ * Executado periodicamente no nível raiz do aplicativo.
+ */
+export function checkAndTriggerScheduleNotifications(
+  now: Date,
+  routines: any[] = [],
+  tasks: any[] = [],
+  profile?: any
+): void {
+  try {
+    const currentHM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+    const dayOfWeek = now.getDay();
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+    // Conjunto de chaves já notificadas hoje persistido em localStorage
+    const storageKey = `flowlife_notified_events_${dateStr}`;
+    let notifiedSet = new Set<string>();
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        notifiedSet = new Set(JSON.parse(raw));
+      }
+    } catch (_) {}
+
+    const markNotified = (key: string) => {
+      notifiedSet.add(key);
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(Array.from(notifiedSet)));
+      } catch (_) {}
+    };
+
+    const webhookUrl = profile?.webhookUrl || profile?.webhookUrlStart;
+
+    // 1. Checar Encerramento do Expediente (ex: 19:00)
+    const workEnd = profile?.workEndTime || '19:00';
+    const [wEndH, wEndM] = workEnd.split(':').map(Number);
+    const workEndMinutes = (wEndH || 19) * 60 + (wEndM || 0);
+
+    if (currentMinutes >= workEndMinutes && currentMinutes <= workEndMinutes + 2) {
+      const key = `workday-end-${dateStr}-${workEnd}`;
+      if (!notifiedSet.has(key)) {
+        markNotified(key);
+        notifyWorkdayEnd(workEnd, profile?.webhookUrlEnd || webhookUrl);
+      }
+    }
+
+    // 2. Checar Rotinas Inegociáveis do dia (Ex: 07:15, 09:30, etc.)
+    routines.forEach(routine => {
+      if (!routine.daysOfWeek || !routine.daysOfWeek.includes(dayOfWeek)) return;
+      if (!routine.startTime) return;
+
+      const [rH, rM] = routine.startTime.split(':').map(Number);
+      const routineMinutes = (rH || 0) * 60 + (rM || 0);
+      const diff = routineMinutes - currentMinutes;
+
+      const routineId = routine.id || routine.title;
+
+      // Aviso prévio de 5 minutos
+      if (diff === 5) {
+        const warnKey = `routine-warn-5m-${routineId}-${dateStr}`;
+        if (!notifiedSet.has(warnKey)) {
+          markNotified(warnKey);
+          notifyRoutineWarning5Min(routine.title, routine.startTime, webhookUrl);
+        }
+      }
+
+      // Início da rotina (no horário exato ou até 2 minutos de tolerância após)
+      if (diff <= 0 && diff >= -2) {
+        const startKey = `routine-start-${routineId}-${dateStr}`;
+        if (!notifiedSet.has(startKey)) {
+          markNotified(startKey);
+          notifyRoutineStart(routine.title, routine.startTime, webhookUrl);
+        }
+      }
+    });
+
+    // 3. Checar Tarefas Agendadas para Hoje
+    tasks.forEach(task => {
+      if (task.status === 'completed') return;
+      const isForToday = task.dateAllocated === dateStr || (!task.dateAllocated && task.scheduledStartTime);
+      if (!isForToday || !task.scheduledStartTime) return;
+
+      const [tH, tM] = task.scheduledStartTime.split(':').map(Number);
+      const taskStartMinutes = (tH || 0) * 60 + (tM || 0);
+      const diff = taskStartMinutes - currentMinutes;
+      const taskId = task.id || task.title;
+
+      // Aviso prévio de 5 minutos
+      if (diff === 5) {
+        const warnKey = `task-pre-warn-${taskId}-${dateStr}`;
+        if (!notifiedSet.has(warnKey)) {
+          markNotified(warnKey);
+          notifyTaskWarning5MinBeforeStart(task.title, task.scheduledStartTime, webhookUrl);
+        }
+      }
+
+      // Início da tarefa (no horário exato ou até 2 minutos de tolerância após)
+      if (diff <= 0 && diff >= -2) {
+        const startKey = `task-start-${taskId}-${dateStr}`;
+        if (!notifiedSet.has(startKey)) {
+          markNotified(startKey);
+          notifyTimelineTaskStarting(task.title, task.scheduledStartTime);
+        }
+      }
+    });
+  } catch (err) {
+    console.warn('Erro na checagem de notificações de agenda:', err);
+  }
+}
+

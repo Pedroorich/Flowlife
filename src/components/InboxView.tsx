@@ -64,6 +64,7 @@ export interface TaskItemProposal {
   timeEstimate?: number;
   timeMax?: number;
   scheduledStartTime?: string;
+  dateAllocated?: string; // YYYY-MM-DD para sincronizar na semana e no hoje
   isFixed?: boolean;
   assignedAgentId?: string;
   notes?: string;
@@ -503,7 +504,7 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
             scheduledStartTime: pt.scheduledStartTime || undefined,
             isFixed: pt.isFixed ?? (pt.type === 'Compromisso' || pt.type === 'Reunião'),
             assignedAgentId: pt.assignedAgentId || undefined,
-            dateAllocated: pt.scheduledStartTime ? todayKey : undefined,
+            dateAllocated: pt.dateAllocated || (pt.scheduledStartTime ? todayKey : todayKey),
             notes: (pt as any).notes || '',
             status: 'pending',
             userId: currentUid,
@@ -597,12 +598,22 @@ export function InboxView({ profile, projects = [], tasks = [], routines = [], o
       const projectsContext = projects.length > 0
         ? projects.map(p => `- ${p.name} (Área: ${p.area})`).join('\n')
         : 'Nenhum projeto cadastrado ainda.';
+      const now = new Date();
+      const currentHM = format(now, 'HH:mm');
+      const todayDateStr = format(now, 'yyyy-MM-dd');
+      const dayOfWeekNames = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+      const dayOfWeekName = dayOfWeekNames[now.getDay()];
 
       const systemPrompt = `Você é o assistente executivo e gerenciador central de sistema do FlowLife.
 O usuário é o Pedro (trabalha com marketing digital, ofertas validadas, tráfego orgânico, projetos paralelos, musculação, Jiu-Jitsu, teatro, leitura e igreja).
 
 Você tem AUTORIDADE TOTAL para configurar e alterar a estrutura completa do app a partir da conversa com o usuário.
 O usuário pode tanto falar pelo microfone quanto digitar livremente.
+
+HORÁRIO E DATA ATUAL DO SISTEMA (CONSCIÊNCIA TEMPORAL):
+- Agora são exatamente: ${currentHM} de ${dayOfWeekName} (Data: ${todayDateStr}).
+- Quando o usuário mencionar "hoje", use a data: ${todayDateStr}.
+- Quando o usuário mencionar dias da semana ou planejar a rotina, distribua o trabalho ao longo dos dias úteis da semana atual.
 
 ESTRUTURA ATUAL DO SISTEMA DO USUÁRIO:
 - Horários de Perfil: Acordar: ${profile.wakeTime || '07:00'} | Dormir: ${profile.bedTime || '23:00'} | Início: ${profile.workStartTime || '08:30'} | Corte Inegociável: ${profile.workEndTime || '19:00'}
@@ -616,7 +627,7 @@ SUAS CAPACIDADES NO SISTEMA:
 1. 'routines': Blocos semanais recorrentes inegociáveis.
    - title: nome do hábito ou compromisso (ex: "Musculação", "Jiu-Jitsu", "Aula de Teatro", "Leitura Matinal", "Almoço", "Igreja")
    - area: área da vida ("Saúde & Treino", "Descanso & Pessoal", "Estudos", "Trabalho", etc.)
-   - startTime e endTime: formato "HH:mm" (ex: "18:00", "19:00")
+   - startTime e endTime: formato "HH:mm" (ex: "07:15", "18:00")
    - daysOfWeek: array de números (0=Dom, 1=Seg, 2=Ter, 3=Qua, 4=Qui, 5=Sex, 6=Sáb)
    - transitMinutesBefore / transitMinutesAfter: minutos de deslocamento (ex: 15 ou 30)
    - isFixed: true
@@ -635,7 +646,8 @@ SUAS CAPACIDADES NO SISTEMA:
    - priority: "Alta" | "Média" | "Baixa"
    - urgency e impact: números de 1 a 5
    - timeEstimate (ex: 45) e timeMax (ex: 75)
-   - scheduledStartTime: horário sugerido (ex: "09:00")
+   - dateAllocated: Data alocada no formato "YYYY-MM-DD" (SEMPRE defina para ${todayDateStr} ou para os dias da semana para que o trabalho sincronize na semana e na aba Hoje, sem ficar preso em projetos!)
+   - scheduledStartTime: horário sugerido se for compromisso/reunião (ex: "09:00")
    - assignedAgentId: agente copiloto ("agent-instagram-creator", "agent-study-tutor", "agent-marketing-strategist", "agent-fitness-coach", "agent-executive-writer")
 
 4. 'profileUpdates': Atualização de limites de expediente e sono (wakeTime, bedTime, workStartTime, workEndTime).
@@ -704,8 +716,10 @@ REGRAS OBRIGATÓRIAS:
 4. Use tópicos com marcadores (• ou -) para opções ou etapas.
 5. NUNCA envie texto corrido em um único bloco.`;
 
-      const chatHistory = messages.map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.text}`).join('\n');
-      const prompt = `Histórico:\n${chatHistory}\nUser: ${textToSend}\nAI:`;
+      // Janela deslizante: últimas 8 mensagens para máxima velocidade de inferência
+      const recentMessages = messages.slice(-8);
+      const chatHistory = recentMessages.map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.text}`).join('\n');
+      const prompt = `Histórico Recente:\n${chatHistory}\nUser: ${textToSend}\nAI:`;
 
       const rawResponse = await callGemini({
         apiKey: currentKey,

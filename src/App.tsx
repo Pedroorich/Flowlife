@@ -30,6 +30,8 @@ import { DashboardView } from './components/DashboardView';
 import { NotificationsView } from './components/NotificationsView';
 import { SettingsView } from './components/SettingsView';
 import { AgentsView } from './components/AgentsView';
+import { SystemStatusBar } from './components/SystemStatusBar';
+import { checkAndTriggerScheduleNotifications } from './lib/notificationEngine';
 
 type Tab = 'today' | 'weekly' | 'projects' | 'agents' | 'routines' | 'inbox' | 'dashboard' | 'monthly' | 'notifications' | 'settings';
 
@@ -125,6 +127,21 @@ export default function App() {
       unsubAgents();
     };
   }, [user, profile]);
+
+  // Monitor Global de Horário e Notificações de Agenda (Rotinas, Tarefas e Corte das 19:00)
+  useEffect(() => {
+    if (!profile) return;
+
+    // Disparo imediato ao carregar
+    checkAndTriggerScheduleNotifications(new Date(), routines, tasks, profile);
+
+    // Checagem periódica a cada 10 segundos
+    const scheduleInterval = setInterval(() => {
+      checkAndTriggerScheduleNotifications(new Date(), routines, tasks, profile);
+    }, 10000);
+
+    return () => clearInterval(scheduleInterval);
+  }, [routines, tasks, profile]);
 
   const handleLogin = async () => {
     try {
@@ -259,6 +276,15 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1 pb-24 md:pb-8 overflow-y-auto">
+        {/* Barra de Comunicação Interna de Horário, Atividade Atual e Status de Notificações */}
+        <SystemStatusBar
+          routines={routines}
+          tasks={tasks}
+          profile={profile}
+          onNavigateToNotifications={() => setActiveTab('notifications')}
+          onNavigateToToday={() => setActiveTab('today')}
+        />
+
         <div className="max-w-6xl mx-auto p-4 md:p-8">
           <div className="flex justify-between items-center mb-6 md:hidden">
             <div className="flex items-center gap-2">
@@ -317,13 +343,16 @@ export default function App() {
                 tasks={tasks} 
                 unforeseenEvents={unforeseenEvents}
                 routines={routines}
+                projects={projects}
               />
             )}
             {activeTab === 'projects' && (
               <ProjectsView 
                 profile={profile} 
                 projects={projects} 
-                tasks={tasks} 
+                tasks={tasks}
+                routines={routines}
+                unforeseenEvents={unforeseenEvents}
               />
             )}
             {activeTab === 'routines' && (

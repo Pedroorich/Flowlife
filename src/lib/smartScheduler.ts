@@ -122,6 +122,22 @@ export const DEFAULT_ROUTINES: Omit<RoutineBlock, 'id' | 'userId'>[] = [
   }
 ];
 
+export function normalizeRoutine(r: RoutineBlock): RoutineBlock {
+  let days = r.daysOfWeek;
+  if (!Array.isArray(days) || days.length === 0) {
+    // Se não tiver dias especificados, aplica para todos os dias úteis (Seg a Sex)
+    days = [1, 2, 3, 4, 5];
+  }
+  return {
+    ...r,
+    daysOfWeek: days,
+    startTime: r.startTime || '08:00',
+    endTime: r.endTime || '09:00',
+    transitMinutesBefore: Number(r.transitMinutesBefore) || 0,
+    transitMinutesAfter: Number(r.transitMinutesAfter) || 0
+  };
+}
+
 /**
  * Constrói a Timeline Diária Inteligente com respeito rigoroso
  * ao horário de encerramento, rotinas inegociáveis, deslocamentos e tarefas por Prioridade Real.
@@ -142,11 +158,16 @@ export function buildDailyTimeline(
   const workStartMin = timeToMinutes(workStartTime);
   const workEndMin = timeToMinutes(workEndTime);
 
-  const rawRoutines = customRoutines.length > 0 
+  // Consulta e normalização ativa das rotinas do banco de dados
+  const rawRoutines = (customRoutines.length > 0 
     ? customRoutines 
-    : (profile.routinesCleared ? [] : DEFAULT_ROUTINES.map((r, i) => ({ ...r, id: `default-${i}`, userId: profile.uid })));
+    : (profile.routinesCleared ? [] : DEFAULT_ROUTINES.map((r, i) => ({ ...r, id: `default-${i}`, userId: profile.uid }))))
+    .map(normalizeRoutine);
 
-  const dayRoutines = rawRoutines.filter(r => r.daysOfWeek.includes(dayOfWeek));
+  // Filtra as rotinas do dia da semana e ordena rigorosamente pelo horário de início
+  const dayRoutines = rawRoutines
+    .filter(r => r.daysOfWeek.includes(dayOfWeek))
+    .sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
 
   const slots: TimeSlot[] = [];
 
@@ -550,3 +571,112 @@ export function distributeTasks(
 
   return schedule;
 }
+
+/**
+ * Sincroniza e distribui de forma inteligente as tarefas de projetos e trabalho
+ * ao longo dos dias úteis da semana (Segunda a Sexta), respeitando a capacidade real
+ * de cada dia, rotinas inegociáveis e horário de corte das 19:00.
+ */
+export function distributeWorkAcrossWeek(
+  tasks: Task[],
+  profile: UserProfile,
+  routines: RoutineBlock[] = [],
+  unforeseenEvents: UnforeseenEvent[] = [],
+  targetProjectId?: string,
+  startDate: Date = new Date()
+): {
+  allocations: { taskId: string; dateAllocated: string; dayName: string }[];
+  summary: string;
+} {
+  // Filtrar tarefas pendentes de trabalho/projetos que precisam de alocação
+  const candidateTasks = tasks.filter(t => {
+    if (t.status === 'completed') return false;
+    if (targetProjectId) {
+      return t.projectId === targetProjectId;
+    }
+    // Todas as tarefas com projectId ou da área de Trabalho/Projetos
+    return Boolean(t.projectId) || t.area === 'Trabalho' || t.area === 'Projetos & Ofertas' || t.area === 'Conteúdo & Tráfego';
+  });
+
+  if (candidateTasks.length === 0) {
+    return {
+      allocations: [],
+      summary: 'Nenhuma tarefa pendente de trabalho encontrada para distribuir.'
+    };
+  }
+
+  // Ordenar tarefas candidatas por prioridade real
+  const sortedCandidates = sortTasksByRealPriority(candidateTasks, startDate);
+
+  // Mapear os próximos 5 a 7 dias úteis a partir de hoje
+  const daysToPlan: Date[] = [];
+  let dayCursor = startOfDay(startDate);
+
+  // Se for sábado ou domingo, avança para a próxima segunda
+  while (daysToPlan.length < 5) {
+    const dOfWeek = getDay(dayCursor);
+    if (dOfWeek >= 1 && dOfWeek <= 5) { // Segunda a Sexta
+      daysToPlan.push(new Date(dayCursor));
+    }
+    dayCursor = addDays(dayCursor, 1);
+  }
+
+  const allocations: { taskId: string; dateAllocated: string; dayName: string }[] = [];
+  const DAY_LABELS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+
+  let taskIndex = 0;
+
+  for (const day of daysToPlan) {
+    if (taskIndex >= sortedCandidates.length) break;
+
+    const dateStr = format(day, 'yyyy-MM-dd');
+    const dayName = DAY_LABELS[getDay(day)];
+
+    // Calcular capacidade do dia atual
+    const dayTimeline = buildDailyTimeline(day, tasks, profile, routines, unforeseenEvents);
+    let remainingMinutes = Math.max(0, dayTimeline.totalAvailableWorkMinutes - dayTimeline.totalPlannedWorkMinutes);
+
+    // Se já estiver sobrecarregado ou quase cheio, pula para o próximo dia
+    if (remainingMinutes < 20) continue;
+
+    while (taskIndex < sortedCandidates.length && remainingMinutes >= 20) {
+      const currentTask = sortedCandidates[taskIndex];
+      const estimate = currentTask.timeEstimate || 45;
+
+      // Aloca a tarefa neste dia
+      if (currentTask.id) {
+        allocations.push({
+          taskId: currentTask.id,
+          dateAllocated: dateStr,
+          dayName
+        });
+      }
+
+      remainingMinutes -= estimate;
+      taskIndex++;
+    }
+  }
+
+  // Se ainda sobraram tarefas que excederam os 5 dias úteis, aloca no último dia útil para não sumir
+  const lastDay = daysToPlan[daysToPlan.length - 1];
+  const lastDateStr = format(lastDay, 'yyyy-MM-dd');
+  const lastDayName = DAY_LABELS[getDay(lastDay)];
+
+  while (taskIndex < sortedCandidates.length) {
+    const currentTask = sortedCandidates[taskIndex];
+    if (currentTask.id) {
+      allocations.push({
+        taskId: currentTask.id,
+        dateAllocated: lastDateStr,
+        dayName: lastDayName
+      });
+    }
+    taskIndex++;
+  }
+
+  return {
+    allocations,
+    summary: `${allocations.length} tarefas de trabalho distribuídas harmonicamente ao longo dos dias úteis da semana!`
+  };
+}
+

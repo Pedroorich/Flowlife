@@ -61,6 +61,14 @@ export function TodayView({
   const [timeline, setTimeline] = useState<DailyTimelineResult>(() => 
     buildDailyTimeline(todayDate, tasks, profile, routines, unforeseenEvents)
   );
+  const [recalcFeedback, setRecalcFeedback] = useState(false);
+
+  const handleReallocateWithDatabaseRoutines = () => {
+    const updated = buildDailyTimeline(todayDate, tasks, profile, routines, unforeseenEvents);
+    setTimeline(updated);
+    setRecalcFeedback(true);
+    setTimeout(() => setRecalcFeedback(false), 3000);
+  };
 
   // Timer & Modo Foco State
   const [activeTimer, setActiveTimer] = useState<{ 
@@ -167,34 +175,62 @@ export function TodayView({
     }
   }, [activeTimer?.timeLeft, profile.dailyState, tasks, profile.uid, profile.webhookUrl, profile.webhookUrl5Min, profile.webhookUrlEnd]);
 
-  // Checagem de Tarefas Agendadas na Timeline e Horário de Encerramento do Expediente
-  useEffect(() => {
-    const notifiedMap = new Set<string>();
-    const checkScheduleInterval = setInterval(() => {
-      const now = new Date();
-      const currentHM = format(now, 'HH:mm');
+  // Handlers para Alocação de Demandas em Hoje
+  const [showQuickAddToday, setShowQuickAddToday] = useState(false);
+  const [quickAddTitle, setQuickAddTitle] = useState('');
+  const [quickAddEstimate, setQuickAddEstimate] = useState(45);
+  const [quickAddProjectId, setQuickAddProjectId] = useState('');
 
-      // 1. Alerta de Encerramento do Expediente
-      const workEnd = profile.workEndTime || '19:00';
-      if (currentHM === workEnd && !notifiedMap.has(`workend-${currentHM}`)) {
-        notifiedMap.add(`workend-${currentHM}`);
-        notifyWorkdayEnd(workEnd, profile.webhookUrlEnd || profile.webhookUrl);
-      }
+  const handlePullNextTaskToToday = async () => {
+    const unallocated = tasks.filter(t => 
+      t.status === 'pending' && 
+      t.dateAllocated !== todayStr &&
+      (Boolean(t.projectId) || t.area === 'Trabalho' || t.area === 'Projetos & Ofertas')
+    );
 
-      // 2. Alerta de Tarefas Agendadas para o Horário Atual
-      tasks.forEach(t => {
-        if (t.status === 'pending' && t.scheduledStartTime === currentHM) {
-          const key = `task-start-${t.id}-${currentHM}`;
-          if (!notifiedMap.has(key) && profile.dailyState?.currentTaskId !== t.id) {
-            notifiedMap.add(key);
-            notifyTimelineTaskStarting(t.title, currentHM);
-          }
-        }
+    const candidate = unallocated.length > 0 ? unallocated[0] : tasks.find(t => t.status === 'pending' && t.dateAllocated !== todayStr);
+
+    if (!candidate || !candidate.id) {
+      alert('Todas as suas tarefas de trabalho já estão alocadas ou concluídas!');
+      return;
+    }
+
+    try {
+      await updateDoc(doc(db, 'tasks', candidate.id), {
+        dateAllocated: todayStr
       });
-    }, 30000); // Checa a cada 30s
+    } catch (e) {
+      console.error('Erro ao puxar tarefa para hoje:', e);
+    }
+  };
 
-    return () => clearInterval(checkScheduleInterval);
-  }, [tasks, profile.workEndTime, profile.webhookUrl, profile.webhookUrlEnd, profile.dailyState?.currentTaskId]);
+  const handleCreateTaskForToday = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickAddTitle.trim()) return;
+
+    try {
+      await addDoc(collection(db, 'tasks'), {
+        userId: profile.uid,
+        title: quickAddTitle.trim(),
+        type: 'Tarefa',
+        area: 'Trabalho',
+        projectId: quickAddProjectId || undefined,
+        priority: 'Alta',
+        urgency: 4,
+        impact: 4,
+        timeEstimate: Number(quickAddEstimate) || 45,
+        timeMax: Math.round((Number(quickAddEstimate) || 45) * 1.5),
+        status: 'pending',
+        dateAllocated: todayStr,
+        createdAt: new Date().toISOString()
+      });
+
+      setQuickAddTitle('');
+      setShowQuickAddToday(false);
+    } catch (e) {
+      console.error('Erro ao criar tarefa para hoje:', e);
+    }
+  };
 
   // Iniciar Tarefa no Modo Foco
   const handleStartTask = async (task: Task) => {
@@ -577,17 +613,266 @@ export function TodayView({
         </div>
       </div>
 
+      {/* 4.5. DEMANDAS DE TRABALHO & TAREFAS DE HOJE */}
+      <div className="bg-surface border border-border rounded-2xl p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-xs font-bold uppercase tracking-wider text-accent-amber">
+                Foco Prático
+              </span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-accent-amber/20 text-accent-amber font-mono font-bold">
+                {pendingTodayTasks.length} pendente(s)
+              </span>
+            </div>
+            <h3 className="font-serif text-xl text-white">Demandas & Tarefas de Hoje</h3>
+            <p className="text-xs text-gray-400">
+              Todas as ações de trabalho, projetos e entregas alocadas para o seu dia.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handlePullNextTaskToToday}
+              className="flex items-center gap-1.5 px-3 py-2 bg-purple-500/15 text-purple-300 border border-purple-500/30 rounded-xl hover:bg-purple-500/25 transition-all text-xs font-semibold"
+              title="Puxar a próxima tarefa pendente do backlog de trabalho para hoje"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+              Puxar da Semana
+            </button>
+            <button
+              onClick={() => setShowQuickAddToday(true)}
+              className="flex items-center gap-1.5 px-3 py-2 bg-accent-amber text-background rounded-xl hover:bg-amber-400 transition-all text-xs font-bold shadow-md"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Nova Demanda
+            </button>
+          </div>
+        </div>
+
+        {/* Modal Rápido de Nova Demanda para Hoje */}
+        {showQuickAddToday && (
+          <form onSubmit={handleCreateTaskForToday} className="mb-6 p-4 rounded-xl bg-background/90 border border-accent-amber/40 animate-in fade-in space-y-3">
+            <div className="text-xs font-bold text-accent-amber">Adicionar Tarefa Direta para Hoje</div>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <input
+                type="text"
+                value={quickAddTitle}
+                onChange={e => setQuickAddTitle(e.target.value)}
+                placeholder="Nome da demanda ou entrega..."
+                required
+                className="flex-1 bg-surface border border-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-accent-amber"
+              />
+              <input
+                type="number"
+                value={quickAddEstimate}
+                onChange={e => setQuickAddEstimate(Number(e.target.value))}
+                min="15"
+                step="15"
+                placeholder="Duração (min)"
+                className="w-28 bg-surface border border-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-accent-amber font-mono"
+              />
+              {projects.length > 0 && (
+                <select
+                  value={quickAddProjectId}
+                  onChange={e => setQuickAddProjectId(e.target.value)}
+                  className="bg-surface border border-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-accent-amber"
+                >
+                  <option value="">Sem Projeto (Geral)</option>
+                  {projects.map(p => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowQuickAddToday(false)}
+                className="px-3 py-1.5 rounded-lg border border-border text-gray-400 hover:text-white text-xs"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-1.5 bg-accent-amber text-background font-bold rounded-lg text-xs hover:bg-amber-400 transition-colors"
+              >
+                Salvar para Hoje
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Lista de Demandas */}
+        {pendingTodayTasks.length === 0 && completedTodayCount === 0 ? (
+          <div className="py-10 text-center border border-dashed border-border rounded-xl">
+            <Layers className="w-10 h-10 text-gray-500 mx-auto mb-2 opacity-50" />
+            <div className="text-sm font-medium text-white mb-1">Nenhuma demanda de trabalho alocada para hoje</div>
+            <p className="text-xs text-gray-400 max-w-md mx-auto mb-4">
+              Você pode puxar tarefas pendentes dos seus projetos ou criar uma nova entrega para organizar o trabalho nas janelas livres do dia.
+            </p>
+            <div className="flex justify-center gap-3">
+              <button
+                onClick={handlePullNextTaskToToday}
+                className="px-4 py-2 bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-500/40 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-purple-400" /> Puxar Tarefa do Projeto
+              </button>
+              <button
+                onClick={() => setShowQuickAddToday(true)}
+                className="px-4 py-2 bg-accent-amber text-background rounded-xl text-xs font-bold hover:bg-amber-400 transition-all flex items-center gap-1.5"
+              >
+                <Plus className="w-3.5 h-3.5" /> Criar Demanda Agora
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {pendingTodayTasks.map(task => {
+              const proj = projects.find(p => p.id === task.projectId);
+              const isRunning = activeTimer?.taskId === task.id;
+
+              return (
+                <div
+                  key={task.id}
+                  className={cn(
+                    "flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl border transition-all",
+                    isRunning 
+                      ? "bg-accent-amber/10 border-accent-amber shadow-md" 
+                      : "bg-background/80 border-border hover:border-gray-600"
+                  )}
+                >
+                  <div className="flex items-start gap-3 flex-1 min-w-0">
+                    <button
+                      onClick={() => handleCompleteTask(task)}
+                      className="mt-0.5 w-5 h-5 rounded-lg border border-gray-500 hover:border-accent-emerald hover:bg-accent-emerald/20 flex items-center justify-center text-transparent hover:text-accent-emerald transition-all shrink-0"
+                      title="Concluir tarefa"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                    </button>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2 mb-1">
+                        {proj && (
+                          <span 
+                            className="text-[10px] px-2 py-0.5 rounded font-bold border"
+                            style={{ 
+                              backgroundColor: `${proj.color || '#f59e0b'}20`, 
+                              borderColor: `${proj.color || '#f59e0b'}40`,
+                              color: proj.color || '#f59e0b'
+                            }}
+                          >
+                            {proj.name}
+                          </span>
+                        )}
+                        <span className="text-[10px] px-2 py-0.5 rounded bg-white/5 border border-white/10 text-gray-300">
+                          {task.area}
+                        </span>
+                        {task.scheduledStartTime && (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                            {task.scheduledStartTime}
+                          </span>
+                        )}
+                        {isRunning && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-accent-amber text-background animate-pulse">
+                            RODANDO AGORA
+                          </span>
+                        )}
+                      </div>
+                      <h4 className="text-sm font-semibold text-white truncate">{task.title}</h4>
+                      {task.notes && (
+                        <p className="text-xs text-gray-400 line-clamp-1 mt-0.5">{task.notes}</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                    <span className="font-mono text-xs text-gray-400 mr-1">{task.timeEstimate}m</span>
+
+                    {/* Copiloto IA */}
+                    <button
+                      onClick={() => handleOpenCopilot(task)}
+                      className={cn(
+                        "p-2 rounded-xl border transition-all text-xs",
+                        task.assignedAgentId 
+                          ? "bg-accent-amber/20 border-accent-amber text-accent-amber hover:bg-accent-amber/30" 
+                          : "bg-white/5 border-white/10 text-gray-400 hover:text-accent-amber"
+                      )}
+                      title={task.assignedAgentId ? `Copiloto: ${getAgentById(task.assignedAgentId)?.name}` : "Acionar Copiloto de IA"}
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Iniciar / Pausar Timer */}
+                    {!isRunning ? (
+                      <button
+                        onClick={() => handleStartTask(task)}
+                        className="px-3 py-1.5 rounded-xl bg-accent-amber text-background font-bold text-xs hover:bg-amber-400 transition-all flex items-center gap-1 shadow-sm"
+                        title="Iniciar no Modo Foco"
+                      >
+                        <Play className="w-3.5 h-3.5" /> Iniciar
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setActiveTimer(prev => prev ? { ...prev, isPaused: !prev.isPaused } : null)}
+                        className="px-3 py-1.5 rounded-xl bg-accent-amber/20 border border-accent-amber text-accent-amber font-bold text-xs"
+                      >
+                        {activeTimer?.isPaused ? 'Retomar' : 'Pausar'}
+                      </button>
+                    )}
+
+                    {/* Concluir */}
+                    <button
+                      onClick={() => handleCompleteTask(task)}
+                      className="p-2 rounded-xl bg-accent-emerald/15 text-accent-emerald border border-accent-emerald/30 hover:bg-accent-emerald hover:text-background transition-all"
+                      title="Marcar como Concluída"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Excluir */}
+                    <button
+                      onClick={() => handleDeleteTask(task.id!)}
+                      className="p-2 rounded-xl bg-white/5 border border-white/10 text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                      title="Excluir"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       {/* 5. TIMELINE DIÁRIA INTELIGENTE (Visualização Cronológica com Encerramento) */}
       <div className="bg-surface border border-border rounded-2xl p-6">
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
           <div>
             <h3 className="font-serif text-xl text-white">Timeline da sua Rotina</h3>
             <p className="text-xs text-gray-400">
               Rotinas inegociáveis, deslocamentos e blocos de trabalho organizados dinamicamente.
             </p>
           </div>
-          <div className="text-xs text-gray-500 font-mono">
-            {timeline.slots.length} blocos mapeados
+
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={handleReallocateWithDatabaseRoutines}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all",
+                recalcFeedback 
+                  ? "bg-accent-emerald/20 border-accent-emerald text-accent-emerald" 
+                  : "bg-white/5 border-white/10 hover:border-accent-amber text-gray-300 hover:text-white"
+              )}
+              title="Consultar rotinas do banco de dados e realocar tarefas nos blocos livres"
+            >
+              <RotateCcw className={cn("w-3.5 h-3.5 text-accent-amber", recalcFeedback && "animate-spin")} />
+              <span>{recalcFeedback ? "Rotinas do Banco Sincronizadas!" : "Realocar com Rotinas do Banco"}</span>
+            </button>
+
+            <div className="text-xs text-gray-500 font-mono hidden sm:inline">
+              {timeline.slots.length} blocos mapeados
+            </div>
           </div>
         </div>
 
