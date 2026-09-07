@@ -85,81 +85,97 @@ export function getCurrentAndNextActivity(
   tasks: Task[] = [],
   profile?: UserProfile | null
 ): ActivityStatus {
-  const { currentMinutes, dayOfWeek, dateStr } = clock;
+  try {
+    const { currentMinutes, dayOfWeek, dateStr } = clock;
 
-  interface SchedItem {
-    title: string;
-    type: 'routine' | 'task';
-    startMin: number;
-    endMin: number;
-    startTime: string;
-    endTime: string;
-  }
+    interface SchedItem {
+      title: string;
+      type: 'routine' | 'task';
+      startMin: number;
+      endMin: number;
+      startTime: string;
+      endTime: string;
+    }
 
-  const items: SchedItem[] = [];
+    const items: SchedItem[] = [];
 
-  // Rotinas de hoje
-  routines
-    .filter(r => r.daysOfWeek.includes(dayOfWeek))
-    .forEach(r => {
-      const sMin = timeToMinutes(r.startTime);
-      const eMin = timeToMinutes(r.endTime);
-      items.push({
-        title: r.title,
-        type: 'routine',
-        startMin: sMin,
-        endMin: eMin,
-        startTime: r.startTime,
-        endTime: r.endTime
+    // 1. Rotinas de hoje (com validação ultra-segura)
+    if (Array.isArray(routines)) {
+      routines.forEach(r => {
+        if (!r || !r.title || !r.startTime || !r.endTime) return;
+        const days = Array.isArray(r.daysOfWeek) && r.daysOfWeek.length > 0 
+          ? r.daysOfWeek 
+          : [0, 1, 2, 3, 4, 5, 6]; // se não especificado, considera diária
+
+        if (!days.includes(dayOfWeek)) return;
+
+        const sMin = timeToMinutes(r.startTime);
+        const eMin = timeToMinutes(r.endTime);
+        items.push({
+          title: r.title,
+          type: 'routine',
+          startMin: sMin,
+          endMin: eMin,
+          startTime: r.startTime,
+          endTime: r.endTime
+        });
       });
-    });
+    }
 
-  // Tarefas com horário agendado hoje
-  tasks
-    .filter(t => t.status === 'pending' && t.dateAllocated === dateStr && t.scheduledStartTime)
-    .forEach(t => {
-      const sMin = timeToMinutes(t.scheduledStartTime!);
-      const duration = t.timeEstimate || 45;
-      const eMin = sMin + duration;
-      const endHour = Math.floor(eMin / 60);
-      const endMinPart = eMin % 60;
-      const endTime = `${String(endHour).padStart(2, '0')}:${String(endMinPart).padStart(2, '0')}`;
-      items.push({
-        title: t.title,
-        type: 'task',
-        startMin: sMin,
-        endMin: eMin,
-        startTime: t.scheduledStartTime!,
-        endTime
+    // 2. Tarefas com horário agendado hoje (com validação ultra-segura)
+    if (Array.isArray(tasks)) {
+      tasks.forEach(t => {
+        if (!t || !t.title || !t.scheduledStartTime) return;
+        if (t.status === 'completed') return;
+        if (t.dateAllocated && t.dateAllocated !== dateStr) return;
+
+        const sMin = timeToMinutes(t.scheduledStartTime);
+        const duration = Number(t.timeEstimate) || 45;
+        const eMin = sMin + duration;
+        const endHour = Math.floor(eMin / 60);
+        const endMinPart = eMin % 60;
+        const endTime = `${String(endHour).padStart(2, '0')}:${String(endMinPart).padStart(2, '0')}`;
+        items.push({
+          title: t.title,
+          type: 'task',
+          startMin: sMin,
+          endMin: eMin,
+          startTime: t.scheduledStartTime,
+          endTime
+        });
       });
-    });
+    }
 
-  // Ordenar por horário de início
-  items.sort((a, b) => a.startMin - b.startMin);
+    // Ordenar por horário de início
+    items.sort((a, b) => a.startMin - b.startMin);
 
-  // Atividade atual
-  let currentActivity: ActivityStatus['currentActivity'] = null;
-  const current = items.find(i => currentMinutes >= i.startMin && currentMinutes < i.endMin);
-  if (current) {
-    currentActivity = {
-      title: current.title,
-      type: current.type,
-      timeRange: `${current.startTime} – ${current.endTime}`,
-      remainingMinutes: Math.max(0, current.endMin - currentMinutes)
-    };
+    // Atividade atual
+    let currentActivity: ActivityStatus['currentActivity'] = null;
+    const current = items.find(i => currentMinutes >= i.startMin && currentMinutes < i.endMin);
+    if (current) {
+      currentActivity = {
+        title: current.title,
+        type: current.type,
+        timeRange: `${current.startTime} – ${current.endTime}`,
+        remainingMinutes: Math.max(0, current.endMin - currentMinutes)
+      };
+    }
+
+    // Próxima atividade
+    let nextActivity: ActivityStatus['nextActivity'] = null;
+    const next = items.find(i => i.startMin > currentMinutes);
+    if (next) {
+      nextActivity = {
+        title: next.title,
+        type: next.type,
+        startTime: next.startTime,
+        startsInMinutes: next.startMin - currentMinutes
+      };
+    }
+
+    return { currentActivity, nextActivity };
+  } catch (err) {
+    console.warn('Erro ao calcular atividade atual/próxima:', err);
+    return { currentActivity: null, nextActivity: null };
   }
-
-  // Próxima atividade
-  let nextActivity: ActivityStatus['nextActivity'] = null;
-  const next = items.find(i => i.startMin > currentMinutes);
-  if (next) {
-    nextActivity = {
-      title: next.title,
-      type: next.type,
-      startTime: next.startTime,
-      startsInMinutes: next.startMin - currentMinutes
-    };
-  }
-
-  return { currentActivity, nextActivity };
 }

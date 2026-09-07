@@ -32,7 +32,17 @@ export function SystemStatusBar({
   onNavigateToToday
 }: SystemStatusBarProps) {
   const clock = useSystemClock(1000);
-  const { currentActivity, nextActivity } = getCurrentAndNextActivity(clock, routines, tasks, profile);
+  let currentActivity: any = null;
+  let nextActivity: any = null;
+
+  try {
+    const activityInfo = getCurrentAndNextActivity(clock, routines || [], tasks || [], profile);
+    currentActivity = activityInfo.currentActivity;
+    nextActivity = activityInfo.nextActivity;
+  } catch (e) {
+    console.warn('Falha segura em SystemStatusBar:', e);
+  }
+
   const [testNotificationSent, setTestNotificationSent] = useState(false);
   const permissionStatus = getNotificationPermissionStatus();
 
